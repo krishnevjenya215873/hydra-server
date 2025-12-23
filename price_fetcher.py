@@ -126,7 +126,7 @@ class PriceFetcher:
                 # Check HTTP status first
                 if r.status_code != 200:
                     logger.warning(f"MEXC: HTTP {r.status_code} for {symbol} (attempt {attempt + 1}/{max_retries})")
-                    proxy_manager.mark_proxy_failed(db, f"HTTP {r.status_code}")
+                    # Removed: proxy deactivation moved to health checker
                     continue
                 
                 j = r.json()
@@ -153,7 +153,7 @@ class PriceFetcher:
                 error_code = j.get("code")
                 if error_code == 510:  # Rate limit
                     logger.warning(f"MEXC: rate limit for {symbol} (attempt {attempt + 1}/{max_retries})")
-                    proxy_manager.mark_proxy_failed(db, "rate_limit")
+                    # Removed: proxy deactivation moved to health checker
                     continue
                 
                 logger.warning(f"MEXC: unsuccessful response for {symbol}: {j}")
@@ -161,7 +161,7 @@ class PriceFetcher:
                 
             except Exception as e:
                 logger.error(f"MEXC: error for {symbol}: {e}")
-                proxy_manager.mark_proxy_failed(db, str(e))
+                # Removed: proxy deactivation moved to health checker
                 if attempt < max_retries - 1:
                     continue
         
@@ -183,7 +183,7 @@ class PriceFetcher:
                 resp = client.get(url, timeout=DEXSCREENER_TIMEOUT)
                 if resp.status_code != 200:
                     logger.warning(f"Pancake: HTTP {resp.status_code} for {addr}, switching proxy (attempt {attempt + 1}/{max_retries})")
-                    proxy_manager.mark_proxy_failed(db, f"HTTP {resp.status_code}")
+                    # Removed: proxy deactivation moved to health checker
                     continue
             
                 data = resp.json()
@@ -239,7 +239,7 @@ class PriceFetcher:
                 
             except Exception as e:
                 logger.error(f"Pancake: error for {addr}: {e}")
-                proxy_manager.mark_proxy_failed(db, str(e))
+                # Removed: proxy deactivation moved to health checker
                 if attempt < max_retries - 1:
                     continue
         
@@ -287,7 +287,7 @@ class PriceFetcher:
                 
                 if resp.status_code != 200:
                     logger.warning(f"Jupiter: HTTP {resp.status_code} for mint={mint} (attempt {attempt + 1}/{max_retries})")
-                    proxy_manager.mark_proxy_failed(db, f"HTTP {resp.status_code}")
+                    # Removed: proxy deactivation moved to health checker
                     continue
                 
                 data = resp.json()
@@ -313,7 +313,7 @@ class PriceFetcher:
                 
             except Exception as e:
                 logger.error(f"Jupiter: error for mint={mint}: {e}")
-                proxy_manager.mark_proxy_failed(db, str(e))
+                # Removed: proxy deactivation moved to health checker
                 if attempt < max_retries - 1:
                     continue
         
@@ -372,7 +372,7 @@ class PriceFetcher:
             
             if resp.status_code != 200:
                 logger.warning(f"Matcha JWT: HTTP {resp.status_code}")
-                proxy_manager.mark_proxy_failed(db, f"Matcha JWT HTTP {resp.status_code}")
+                # Removed: proxy deactivation moved to health checker
                 return False
             
             data = resp.json()
@@ -392,7 +392,7 @@ class PriceFetcher:
                 
         except Exception as e:
             logger.error(f"Matcha JWT: error getting token: {e}")
-            proxy_manager.mark_proxy_failed(db, str(e))
+            # Removed: proxy deactivation moved to health checker
             return False
     
     def _get_matcha_jwt(self, db: Session) -> Optional[str]:

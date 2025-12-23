@@ -1,6 +1,7 @@
 """
 Proxy manager for server-side requests.
 Handles proxy rotation, failure tracking, and protocol selection.
+UPDATED: Proxies are only deactivated by health checker (ipinfo.io), not by API errors.
 """
 
 import random
@@ -16,10 +17,11 @@ from models import Proxy
 
 logger = logging.getLogger(__name__)
 
-# URL для проверки прокси
-PROXY_CHECK_URL = "https://api.ipify.org?format=json"
-PROXY_CHECK_TIMEOUT = 10  # секунд
-PROXY_CHECK_INTERVAL = 3600  # 1 час в секундах
+# URL для проверки прокси (ipinfo.io вместо ipify)
+PROXY_CHECK_URL = "https://ipinfo.io/json"
+PROXY_CHECK_TIMEOUT = 15  # секунд
+PROXY_CHECK_INTERVAL = 300  # 5 минут в секундах
+PROXY_MAX_FAILURES = 5  # Количество неудачных проверок перед деактивацией
 
 
 class ProxyManager:
@@ -34,8 +36,7 @@ class ProxyManager:
     def _refresh_cache(self, db: Session) -> None:
         """Refresh proxy cache from database."""
         proxies = db.query(Proxy).filter(
-            Proxy.is_active == True,
-            Proxy.fail_count < 5  # Skip proxies with too many failures
+            Proxy.is_active == True
         ).all()
         
         self._proxy_cache = [
@@ -49,6 +50,10 @@ class ProxyManager:
         ]
         self._cache_updated = datetime.utcnow()
         logger.info(f"Proxy cache refreshed: {len(self._proxy_cache)} active proxies")
+    
+    def force_refresh_cache(self, db: Session) -> None:
+        """Force refresh proxy cache from database."""
+        self._refresh_cache(db)
     
     def _should_refresh_cache(self) -> bool:
         """Check if cache needs refresh."""
@@ -66,9 +71,8 @@ class ProxyManager:
             logger.warning("No active proxies available")
             return None
         
-        # Pick random proxy, preferring ones with fewer failures
-        weights = [max(1, 5 - p["fail_count"]) for p in self._proxy_cache]
-        proxy = random.choices(self._proxy_cache, weights=weights, k=1)[0]
+        # Pick random proxy
+        proxy = random.choice(self._proxy_cache)
         
         self._current_proxy = proxy
         return proxy
@@ -103,53 +107,31 @@ class ProxyManager:
         return {"http": url, "https": url}
     
     def mark_proxy_failed(self, db: Session, reason: str = "") -> None:
-        """Mark current proxy as failed and pick a new one."""
+        """
+        DEPRECATED: This method no longer deactivates proxies.
+        Proxies are only deactivated by the health checker.
+        Just logs the failure for debugging.
+        """
         if not self._current_proxy:
             return
         
         proxy_id = self._current_proxy["id"]
+        logger.debug(f"Proxy {proxy_id} request failed (not deactivating): {reason}")
         
-        # Update fail count in database
-        proxy = db.query(Proxy).filter(Proxy.id == proxy_id).first()
-        if proxy:
-            proxy.fail_count += 1
-            if proxy.fail_count >= 5:
-                proxy.is_active = False
-                logger.warning(f"Proxy {proxy_id} disabled after 5 failures")
-            db.commit()
-        
-        # Update cache
-        for p in self._proxy_cache:
-            if p["id"] == proxy_id:
-                p["fail_count"] += 1
-                break
-        
-        # Remove from cache if too many failures
-        self._proxy_cache = [p for p in self._proxy_cache if p["fail_count"] < 5]
-        
-        logger.info(f"Proxy {proxy_id} marked as failed: {reason}")
-        
-        # Pick new proxy
-        self._current_proxy = None
+        # DO NOT update fail_count or deactivate proxy
+        # Health checker will handle this
     
     def mark_proxy_success(self, db: Session) -> None:
-        """Mark current proxy as successful (reset fail count)."""
+        """Mark current proxy as successful (update last_used)."""
         if not self._current_proxy:
             return
         
         proxy_id = self._current_proxy["id"]
         
         proxy = db.query(Proxy).filter(Proxy.id == proxy_id).first()
-        if proxy and proxy.fail_count > 0:
-            proxy.fail_count = 0
+        if proxy:
             proxy.last_used = datetime.utcnow()
             db.commit()
-        
-        # Update cache
-        for p in self._proxy_cache:
-            if p["id"] == proxy_id:
-                p["fail_count"] = 0
-                break
     
     def get_safe_host(self, proxy_url: str) -> str:
         """Get proxy host without credentials for logging."""
@@ -161,10 +143,10 @@ class ProxyManager:
         except Exception:
             return proxy_url
     
-    def check_proxy_health(self, proxy: Dict) -> Dict:
+    def check_proxy_health(self, proxy: Dict, max_retries: int = 5) -> Dict:
         """
-        Проверяет работоспособность одного прокси.
-        Возвращает словарь с результатами проверки.
+        Проверяет работоспособность одного прокси через ipinfo.io.
+        Делает до max_retries попыток перед пометкой как нерабочий.
         """
         protocol = proxy.get("protocol", "socks5").lower()
         proxy_string = proxy.get("proxy_string", "")
@@ -183,45 +165,62 @@ class ProxyManager:
             "working": False,
             "response_time": None,
             "ip": None,
+            "country": None,
             "error": None,
+            "attempts": 0,
             "checked_at": datetime.utcnow().isoformat()
         }
         
-        try:
-            start_time = time.time()
-            response = requests.get(
-                PROXY_CHECK_URL,
-                proxies=proxies,
-                timeout=PROXY_CHECK_TIMEOUT
-            )
-            response_time = time.time() - start_time
+        # Делаем до max_retries попыток
+        for attempt in range(max_retries):
+            result["attempts"] = attempt + 1
             
-            if response.status_code == 200:
-                result["working"] = True
-                result["response_time"] = round(response_time * 1000)  # в миллисекундах
-                try:
-                    result["ip"] = response.json().get("ip")
-                except:
-                    pass
-                logger.info(f"Proxy {proxy.get('id')} OK: {result['response_time']}ms, IP: {result['ip']}")
-            else:
-                result["error"] = f"HTTP {response.status_code}"
-                logger.warning(f"Proxy {proxy.get('id')} failed: HTTP {response.status_code}")
-        except requests.exceptions.Timeout:
-            result["error"] = "Timeout"
-            logger.warning(f"Proxy {proxy.get('id')} failed: Timeout")
-        except requests.exceptions.ProxyError as e:
-            result["error"] = f"Proxy error: {str(e)[:50]}"
-            logger.warning(f"Proxy {proxy.get('id')} failed: Proxy error")
-        except Exception as e:
-            result["error"] = str(e)[:100]
-            logger.warning(f"Proxy {proxy.get('id')} failed: {e}")
+            try:
+                start_time = time.time()
+                response = requests.get(
+                    PROXY_CHECK_URL,
+                    proxies=proxies,
+                    timeout=PROXY_CHECK_TIMEOUT
+                )
+                response_time = time.time() - start_time
+                
+                if response.status_code == 200:
+                    result["working"] = True
+                    result["response_time"] = round(response_time * 1000)  # в миллисекундах
+                    try:
+                        data = response.json()
+                        result["ip"] = data.get("ip")
+                        result["country"] = data.get("country")
+                    except:
+                        pass
+                    logger.info(f"Proxy {proxy.get('id')} OK (attempt {attempt + 1}): {result['response_time']}ms, IP: {result['ip']}, Country: {result['country']}")
+                    return result  # Успех - выходим
+                else:
+                    result["error"] = f"HTTP {response.status_code}"
+                    logger.warning(f"Proxy {proxy.get('id')} attempt {attempt + 1}/{max_retries}: HTTP {response.status_code}")
+                    
+            except requests.exceptions.Timeout:
+                result["error"] = "Timeout"
+                logger.warning(f"Proxy {proxy.get('id')} attempt {attempt + 1}/{max_retries}: Timeout")
+            except requests.exceptions.ProxyError as e:
+                result["error"] = f"Proxy error: {str(e)[:50]}"
+                logger.warning(f"Proxy {proxy.get('id')} attempt {attempt + 1}/{max_retries}: Proxy error")
+            except Exception as e:
+                result["error"] = str(e)[:100]
+                logger.warning(f"Proxy {proxy.get('id')} attempt {attempt + 1}/{max_retries}: {e}")
+            
+            # Ждём перед следующей попыткой
+            if attempt < max_retries - 1:
+                time.sleep(2)
         
+        # Все попытки неудачны
+        logger.warning(f"Proxy {proxy.get('id')} FAILED after {max_retries} attempts: {result['error']}")
         return result
     
     def check_all_proxies(self, db: Session) -> List[Dict]:
         """
         Проверяет все активные прокси и обновляет их статус в БД.
+        Прокси деактивируется только если все 5 попыток неудачны.
         """
         proxies = db.query(Proxy).filter(Proxy.is_active == True).all()
         results = []
@@ -232,7 +231,7 @@ class ProxyManager:
                 "proxy_string": proxy.proxy_string,
                 "protocol": proxy.protocol
             }
-            result = self.check_proxy_health(proxy_dict)
+            result = self.check_proxy_health(proxy_dict, max_retries=PROXY_MAX_FAILURES)
             results.append(result)
             
             # Обновляем статус в БД
@@ -240,26 +239,28 @@ class ProxyManager:
                 proxy.fail_count = 0
                 proxy.last_used = datetime.utcnow()
             else:
-                proxy.fail_count += 1
-                if proxy.fail_count >= 5:
-                    proxy.is_active = False
-                    logger.warning(f"Proxy {proxy.id} disabled after health check failures")
+                # Только если все 5 попыток неудачны - деактивируем
+                proxy.fail_count = PROXY_MAX_FAILURES
+                proxy.is_active = False
+                logger.warning(f"Proxy {proxy.id} DISABLED: failed all {PROXY_MAX_FAILURES} health check attempts")
         
         db.commit()
-        logger.info(f"Health check completed: {len([r for r in results if r['working']])}/{len(results)} proxies working")
+        
+        working_count = len([r for r in results if r['working']])
+        logger.info(f"Health check completed: {working_count}/{len(results)} proxies working")
         return results
 
 
 class ProxyHealthChecker:
     """
-    Фоновый процесс для периодической проверки прокси.
+    Фоновый процесс для периодической проверки прокси каждые 5 минут.
     """
     
     def __init__(self, proxy_manager: 'ProxyManager'):
         self._proxy_manager = proxy_manager
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._interval = PROXY_CHECK_INTERVAL
+        self._interval = PROXY_CHECK_INTERVAL  # 5 минут
         self._last_check_results: List[Dict] = []
         self._last_check_time: Optional[datetime] = None
         self._lock = threading.Lock()
@@ -272,7 +273,7 @@ class ProxyHealthChecker:
         self._running = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        logger.info("Proxy health checker started")
+        logger.info(f"Proxy health checker started (interval: {self._interval}s)")
     
     def stop(self):
         """Останавливает фоновую проверку."""
@@ -296,8 +297,8 @@ class ProxyHealthChecker:
     
     def _run_loop(self):
         """Основной цикл проверки."""
-        # Первая проверка через 30 секунд после запуска
-        time.sleep(30)
+        # Первая проверка через 60 секунд после запуска (даём время на инициализацию)
+        time.sleep(60)
         
         while self._running:
             try:
@@ -305,7 +306,7 @@ class ProxyHealthChecker:
             except Exception as e:
                 logger.error(f"Proxy health check error: {e}")
             
-            # Спим с проверкой флага остановки
+            # Спим 5 минут с проверкой флага остановки
             for _ in range(int(self._interval / 10)):
                 if not self._running:
                     break
@@ -315,6 +316,7 @@ class ProxyHealthChecker:
         """Выполняет проверку прокси."""
         from models import SessionLocal
         
+        logger.info("Starting proxy health check...")
         db = SessionLocal()
         try:
             results = self._proxy_manager.check_all_proxies(db)
