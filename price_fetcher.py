@@ -340,7 +340,13 @@ class PriceFetcher:
             return False
         
         proxies = {"http": proxy_url, "https": proxy_url}
-        logger.info(f"Matcha JWT: using proxy {proxy_manager.get_safe_host(proxy_url)}")
+        
+        # DEBUG: Log all request details
+        logger.info(f"=== MATCHA JWT REQUEST DEBUG ===")
+        logger.info(f"URL: {MATCHA_JWT_URL}")
+        logger.info(f"Proxy URL: {proxy_url}")
+        logger.info(f"Proxies dict: {proxies}")
+        logger.info(f"Headers: {MATCHA_HEADERS}")
         
         # Create FRESH scraper for each JWT request to avoid session contamination
         scraper = cloudscraper.create_scraper(
@@ -350,14 +356,19 @@ class PriceFetcher:
                 "mobile": False
             }
         )
+        logger.info(f"Scraper created: browser=chrome, platform=windows, mobile=False")
         
         try:
+            logger.info(f"Making GET request to {MATCHA_JWT_URL}...")
             resp = scraper.get(
                 MATCHA_JWT_URL,
                 headers=MATCHA_HEADERS,
                 proxies=proxies,
                 timeout=30.0,
             )
+            logger.info(f"Response received: status={resp.status_code}, body_len={len(resp.text)}")
+            logger.info(f"Response body (first 500 chars): {resp.text[:500]}")
+            logger.info(f"=== END MATCHA JWT REQUEST DEBUG ===")
             
             if resp.status_code != 200:
                 logger.warning(f"Matcha JWT: HTTP {resp.status_code}")
