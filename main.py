@@ -531,6 +531,12 @@ async def admin_reset_proxies(
     db.commit()
     
     logger.info(f"Reset {count} proxies (fail_count=0, is_active=True)")
+    
+    # Force refresh proxy cache immediately
+    from proxy_manager import proxy_manager
+    proxy_manager._cache_updated = None  # Force cache refresh on next request
+    proxy_manager._refresh_cache(db)  # Refresh cache now
+    
     return {"status": "ok", "reset_count": count}
 
 
