@@ -203,13 +203,9 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time price updates."""
     await connection_manager.connect(websocket)
     
-    # Send current data immediately
-    current_data = price_worker.get_latest_data()
-    if current_data:
-        await connection_manager.send_personal(websocket, {
-            "type": "initial_data",
-            "payload": current_data
-        })
+    # НЕ отправляем initial_data сразу!
+    # Клиент должен сначала подписаться на нужные токены,
+    # и только потом получит данные через broadcast
     
     try:
         while True:

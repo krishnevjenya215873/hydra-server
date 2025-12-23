@@ -86,37 +86,54 @@ class ConnectionManager:
                 self._client_subscriptions[websocket].add("__all__")
     
     async def broadcast_update(self, data: Dict[str, Any]):
-        """Broadcast price update to subscribed clients."""
+        """Broadcast price update to subscribed clients.
+        
+        Каждый клиент получает ТОЛЬКО те токены, на которые он подписан.
+        """
         if not data:
             return
         
-        # Prepare message
-        message = json.dumps({
-            "type": "data",
-            "payload": data
-        })
-        
         async with self._lock:
-            # Get clients subscribed to "all"
+            # Клиенты подписанные на "all" получают всё
             all_subscribers = self._subscriptions.get("__all__", set())
             
-            # Get clients subscribed to specific tokens
-            specific_subscribers: Set[WebSocket] = set()
+            # Собираем клиентов с их подписками
+            client_tokens: Dict[WebSocket, Set[str]] = {}
+            
             for token_name in data.keys():
                 if token_name in self._subscriptions:
-                    specific_subscribers.update(self._subscriptions[token_name])
-            
-            # Combine all subscribers
-            all_clients = all_subscribers | specific_subscribers
+                    for ws in self._subscriptions[token_name]:
+                        if ws not in client_tokens:
+                            client_tokens[ws] = set()
+                        client_tokens[ws].add(token_name)
         
-        # Send to all relevant clients
+        # Отправляем каждому клиенту только его токены
         disconnected = []
-        for websocket in all_clients:
-            try:
-                await websocket.send_text(message)
-            except Exception as e:
-                logger.warning(f"Error sending to client: {e}")
-                disconnected.append(websocket)
+        
+        # Клиенты с "__all__" получают все данные
+        if all_subscribers:
+            message = json.dumps({"type": "data", "payload": data})
+            for websocket in all_subscribers:
+                try:
+                    await websocket.send_text(message)
+                except Exception as e:
+                    logger.warning(f"Error sending to client: {e}")
+                    disconnected.append(websocket)
+        
+        # Клиенты с конкретными подписками получают только свои токены
+        for websocket, tokens in client_tokens.items():
+            if websocket in all_subscribers:
+                continue  # Уже отправили всё
+            
+            # Фильтруем данные только для подписанных токенов
+            filtered_data = {k: v for k, v in data.items() if k in tokens}
+            if filtered_data:
+                message = json.dumps({"type": "data", "payload": filtered_data})
+                try:
+                    await websocket.send_text(message)
+                except Exception as e:
+                    logger.warning(f"Error sending to client: {e}")
+                    disconnected.append(websocket)
         
         # Clean up disconnected clients
         for ws in disconnected:
@@ -157,6 +174,18 @@ async def handle_websocket_message(websocket: WebSocket, message: str):
                     "type": "subscribed",
                     "payload": {"tokens": tokens}
                 })
+                
+                # Отправляем initial_data ТОЛЬКО для подписанных токенов
+                from worker import price_worker
+                all_data = price_worker.get_latest_data()
+                if all_data:
+                    # Фильтруем только подписанные токены
+                    filtered_data = {k: v for k, v in all_data.items() if k in tokens}
+                    if filtered_data:
+                        await connection_manager.send_personal(websocket, {
+                            "type": "initial_data",
+                            "payload": filtered_data
+                        })
         
         elif msg_type == "subscribe_all":
             await connection_manager.subscribe_all(websocket)
