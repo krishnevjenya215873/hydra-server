@@ -169,6 +169,7 @@ def init_db():
     """Initialize database tables with retry."""
     import time
     import sys
+    import hashlib
     global engine, SessionLocal
     
     print("init_db() called", flush=True)
@@ -181,6 +182,27 @@ def init_db():
             try:
                 Base.metadata.create_all(bind=engine)
                 print(f"Database initialized successfully! SessionLocal={SessionLocal}")
+                
+                # Create default admin user if not exists
+                try:
+                    db = SessionLocal()
+                    existing_admin = db.query(AdminUser).filter(AdminUser.username == "admin").first()
+                    if not existing_admin:
+                        password_hash = hashlib.sha256("admin123".encode()).hexdigest()
+                        admin_user = AdminUser(
+                            username="admin",
+                            password_hash=password_hash,
+                            is_active=True
+                        )
+                        db.add(admin_user)
+                        db.commit()
+                        print("Default admin user created (admin/admin123)")
+                    else:
+                        print("Admin user already exists")
+                    db.close()
+                except Exception as e:
+                    print(f"Failed to create admin user: {e}")
+                
                 return True
             except Exception as e:
                 print(f"Failed to create tables: {e}")
