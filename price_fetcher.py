@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 import cloudscraper
+from curl_cffi import requests as curl_requests
 from sqlalchemy.orm import Session
 
 from models import Token, SpreadHistory
@@ -319,27 +320,15 @@ class PriceFetcher:
         
         return None
     
-    def _get_matcha_scraper(self):
-        """Get or create reusable cloudscraper client for Matcha requests."""
-        if self._matcha_scraper is None:
-            self._matcha_scraper = cloudscraper.create_scraper(
-                browser={
-                    "browser": "chrome",
-                    "platform": "windows",
-                    "mobile": False
-                }
-            )
-        return self._matcha_scraper
-    
     def _refresh_matcha_jwt(self) -> bool:
-        """Refresh JWT token from Matcha API. Returns True if successful."""
-        scraper = self._get_matcha_scraper()
-        
+        """Refresh JWT token from Matcha API using curl_cffi (Chrome TLS fingerprint). Returns True if successful."""
         try:
-            resp = scraper.get(
+            # Use curl_cffi with Chrome impersonation to bypass TLS fingerprint detection
+            resp = curl_requests.get(
                 MATCHA_JWT_URL,
                 headers=MATCHA_HEADERS,
                 timeout=10.0,
+                impersonate="chrome"
             )
             
             if resp.status_code != 200:
@@ -362,8 +351,6 @@ class PriceFetcher:
                 
         except Exception as e:
             logger.error(f"Matcha JWT: error getting token: {e}")
-            # Reset scraper on error - might need fresh session
-            self._matcha_scraper = None
             return False
     
     def _get_matcha_jwt(self) -> Optional[str]:
@@ -409,12 +396,11 @@ class PriceFetcher:
                     time.sleep(1)
                     continue
                 
-                # Make price request with JWT in header
-                scraper = self._get_matcha_scraper()
+                # Make price request with JWT in header using curl_cffi
                 headers = MATCHA_HEADERS.copy()
                 headers["X-Matcha-Jwt"] = jwt_token
                 
-                resp = scraper.get(
+                resp = curl_requests.get(
                     MATCHA_PRICE_URL,
                     params={
                         "chainId": MATCHA_CHAIN_ID,
@@ -424,6 +410,7 @@ class PriceFetcher:
                     },
                     headers=headers,
                     timeout=15.0,
+                    impersonate="chrome"
                 )
                 
                 # If 401/403, token might be invalid - force refresh
