@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 import cloudscraper
+from curl_cffi import requests as curl_requests
 from sqlalchemy.orm import Session
 
 from models import Token, SpreadHistory
@@ -332,47 +333,29 @@ class PriceFetcher:
         return self._matcha_scraper
     
     def _refresh_matcha_jwt(self, db: Session) -> bool:
-        """Refresh JWT token from Matcha API using cloudscraper with proxy. Returns True if successful."""
+        """Refresh JWT token from Matcha API using curl_cffi with Chrome TLS fingerprint."""
         # Get proxy for Matcha request FIRST
         proxy_url = proxy_manager.get_proxy_url(db)
         if not proxy_url:
             logger.warning("Matcha JWT: No proxy available, skipping request")
             return False
         
-        proxies = {"http": proxy_url, "https": proxy_url}
-        
         # DEBUG: Log all request details
-        logger.info(f"=== MATCHA JWT REQUEST DEBUG ===")
+        logger.info(f"=== MATCHA JWT REQUEST DEBUG (curl_cffi) ===")
         logger.info(f"URL: {MATCHA_JWT_URL}")
         logger.info(f"Proxy URL: {proxy_url}")
-        logger.info(f"Proxies dict: {proxies}")
         logger.info(f"Headers: {MATCHA_HEADERS}")
-        
-        # Create FRESH scraper for each JWT request to avoid session contamination
-        # Use nodejs interpreter for better Cloudflare bypass
-        scraper = cloudscraper.create_scraper(
-            browser={
-                "browser": "chrome",
-                "platform": "windows",
-                "mobile": False
-            },
-            interpreter='nodejs'
-        )
-        # Log cloudscraper version and interpreter info
-        import ssl
-        import sys
-        logger.info(f"Python version: {sys.version}")
-        logger.info(f"OpenSSL version: {ssl.OPENSSL_VERSION}")
-        logger.info(f"Cloudscraper version: {cloudscraper.__version__}")
-        logger.info(f"Scraper created: browser=chrome, platform=windows, mobile=False, interpreter={scraper.interpreter}")
+        logger.info(f"Using curl_cffi with Chrome TLS fingerprint (impersonate=chrome)")
         
         try:
             logger.info(f"Making GET request to {MATCHA_JWT_URL}...")
-            resp = scraper.get(
+            # Use curl_cffi with Chrome TLS fingerprint to bypass Cloudflare
+            resp = curl_requests.get(
                 MATCHA_JWT_URL,
                 headers=MATCHA_HEADERS,
-                proxies=proxies,
+                proxies={"http": proxy_url, "https": proxy_url},
                 timeout=30.0,
+                impersonate="chrome"
             )
             logger.info(f"Response received: status={resp.status_code}, body_len={len(resp.text)}")
             logger.info(f"Response body (first 500 chars): {resp.text[:500]}")
@@ -380,7 +363,6 @@ class PriceFetcher:
             
             if resp.status_code != 200:
                 logger.warning(f"Matcha JWT: HTTP {resp.status_code}")
-                # Removed: proxy deactivation moved to health checker
                 return False
             
             data = resp.json()
@@ -400,7 +382,6 @@ class PriceFetcher:
                 
         except Exception as e:
             logger.error(f"Matcha JWT: error getting token: {e}")
-            # Removed: proxy deactivation moved to health checker
             return False
     
     def _get_matcha_jwt(self, db: Session) -> Optional[str]:
