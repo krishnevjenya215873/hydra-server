@@ -308,14 +308,25 @@ class PriceFetcher:
         
         return None
     
+    def _get_matcha_client(self):
+        """Get cloudscraper client specifically for Matcha requests (no proxy needed)."""
+        scraper = cloudscraper.create_scraper(
+            browser={
+                "browser": "chrome",
+                "platform": "windows",
+                "mobile": False
+            }
+        )
+        return scraper
+    
     def get_matcha_price_usdt(
         self,
         db: Session,
         token_address: str,
         token_decimals: int = MATCHA_DEFAULT_SELL_DECIMALS,
-        max_retries: int = 2
+        max_retries: int = 3
     ) -> Optional[float]:
-        """Get token price in USDT via Matcha (0x). Retries with different proxy on failure."""
+        """Get token price in USDT via Matcha (0x). Uses cloudscraper to bypass Cloudflare."""
         token_address = (token_address or "").strip()
         if not token_address:
             return None
@@ -327,11 +338,11 @@ class PriceFetcher:
             return None
         
         for attempt in range(max_retries):
-            client = self._get_client(db)
-            self._throttle()
+            # Use dedicated cloudscraper for Matcha (no proxy - direct request)
+            scraper = self._get_matcha_client()
             
             try:
-                resp = client.get(
+                resp = scraper.get(
                     MATCHA_PRICE_URL,
                     params={
                         "chainId": MATCHA_CHAIN_ID,
@@ -340,12 +351,12 @@ class PriceFetcher:
                         "sellAmount": str(usdt_amount_raw),
                     },
                     headers=MATCHA_HEADERS,
-                    timeout=10.0,
+                    timeout=15.0,
                 )
                 
                 if resp.status_code != 200:
-                    logger.warning(f"Matcha: HTTP {resp.status_code} for {token_address}, switching proxy (attempt {attempt + 1}/{max_retries})")
-                    proxy_manager.mark_proxy_failed(db, f"HTTP {resp.status_code}")
+                    logger.warning(f"Matcha: HTTP {resp.status_code} for {token_address} (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(1)  # Small delay before retry
                     continue
                 
                 data = resp.json()
@@ -365,14 +376,13 @@ class PriceFetcher:
                 
                 price = MATCHA_USDT_AMOUNT / token_amount
                 
-                proxy_manager.mark_proxy_success(db)
-                logger.debug(f"Matcha: 1 TOKEN ({token_address}) = {float(price):.8f} USDT")
+                logger.info(f"Matcha: {token_address} price = {float(price):.8f} USDT")
                 return float(price)
                 
             except Exception as e:
                 logger.error(f"Matcha: error for {token_address}: {e}")
-                proxy_manager.mark_proxy_failed(db, str(e))
                 if attempt < max_retries - 1:
+                    time.sleep(1)  # Small delay before retry
                     continue
         
         return None
