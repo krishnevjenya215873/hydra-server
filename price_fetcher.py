@@ -333,21 +333,30 @@ class PriceFetcher:
     
     def _refresh_matcha_jwt(self, db: Session) -> bool:
         """Refresh JWT token from Matcha API using cloudscraper with proxy. Returns True if successful."""
-        scraper = self._get_matcha_scraper()
-        
-        # Get proxy for Matcha request
+        # Get proxy for Matcha request FIRST
         proxy_url = proxy_manager.get_proxy_url(db)
-        proxies = None
-        if proxy_url:
-            proxies = {"http": proxy_url, "https": proxy_url}
-            logger.debug(f"Matcha JWT: using proxy {proxy_url}")
+        if not proxy_url:
+            logger.warning("Matcha JWT: No proxy available, skipping request")
+            return False
+        
+        proxies = {"http": proxy_url, "https": proxy_url}
+        logger.info(f"Matcha JWT: using proxy {proxy_manager.get_safe_host(proxy_url)}")
+        
+        # Create FRESH scraper for each JWT request to avoid session contamination
+        scraper = cloudscraper.create_scraper(
+            browser={
+                "browser": "chrome",
+                "platform": "windows",
+                "mobile": False
+            }
+        )
         
         try:
             resp = scraper.get(
                 MATCHA_JWT_URL,
                 headers=MATCHA_HEADERS,
                 proxies=proxies,
-                timeout=15.0,
+                timeout=30.0,
             )
             
             if resp.status_code != 200:
@@ -373,8 +382,6 @@ class PriceFetcher:
         except Exception as e:
             logger.error(f"Matcha JWT: error getting token: {e}")
             proxy_manager.mark_proxy_failed(db, str(e))
-            # Reset scraper on error - might need fresh session
-            self._matcha_scraper = None
             return False
     
     def _get_matcha_jwt(self, db: Session) -> Optional[str]:
