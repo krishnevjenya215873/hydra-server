@@ -349,12 +349,14 @@ class PriceFetcher:
         logger.info(f"Headers: {MATCHA_HEADERS}")
         
         # Create FRESH scraper for each JWT request to avoid session contamination
+        # Use nodejs interpreter for better Cloudflare bypass
         scraper = cloudscraper.create_scraper(
             browser={
                 "browser": "chrome",
                 "platform": "windows",
                 "mobile": False
-            }
+            },
+            interpreter='nodejs'
         )
         # Log cloudscraper version and interpreter info
         import ssl
