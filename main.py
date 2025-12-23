@@ -519,6 +519,21 @@ async def admin_force_proxy_check(
     }
 
 
+@app.post("/api/admin/proxies/reset")
+async def admin_reset_proxies(
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Reset fail_count for all proxies and activate them (admin only)."""
+    
+    # Reset all proxies: set fail_count=0 and is_active=True
+    count = db.query(Proxy).update({Proxy.fail_count: 0, Proxy.is_active: True})
+    db.commit()
+    
+    logger.info(f"Reset {count} proxies (fail_count=0, is_active=True)")
+    return {"status": "ok", "reset_count": count}
+
+
 # ============== Admin: Settings ==============
 
 @app.get("/api/admin/settings")
