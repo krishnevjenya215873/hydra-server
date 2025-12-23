@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-CRYPTOSPREAD Server Launcher
+HYDRA Server Launcher
 ============================
 
-Run this script to start the CRYPTOSPREAD server.
+Run this script to start the HYDRA server.
 
 Usage:
     python run_server.py [--host HOST] [--port PORT]
@@ -24,7 +24,7 @@ import uvicorn
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CRYPTOSPREAD Server")
+    parser = argparse.ArgumentParser(description="HYDRA Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
@@ -32,7 +32,7 @@ def main():
     
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║                    CRYPTOSPREAD SERVER                       ║
+║                    HYDRA SERVER                       ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Server:     http://{args.host}:{args.port}                          ║
 ║  Admin:      http://{args.host}:{args.port}/admin                    ║

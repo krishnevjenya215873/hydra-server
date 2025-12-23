@@ -1,5 +1,5 @@
 """
-Database models for CRYPTOSPREAD server.
+Database models for HYDRA server.
 Uses SQLAlchemy with PostgreSQL (Supabase).
 """
 

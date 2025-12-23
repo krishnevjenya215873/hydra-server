@@ -1,5 +1,5 @@
 """
-CRYPTOSPREAD Server - Main FastAPI Application
+HYDRA Server - Main FastAPI Application
 Handles API endpoints, WebSocket connections, and background price fetching.
 """
 
@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI):
     global _main_loop
     
     # Startup
-    logger.info("Starting CRYPTOSPREAD server...")
+    logger.info("Starting HYDRA server...")
     
     # Store reference to main event loop for cross-thread callbacks
     _main_loop = asyncio.get_running_loop()
@@ -150,13 +150,13 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("Shutting down CRYPTOSPREAD server...")
+    logger.info("Shutting down HYDRA server...")
     price_worker.stop()
     proxy_health_checker.stop()
 
 
 app = FastAPI(
-    title="CRYPTOSPREAD Server",
+    title="HYDRA Server",
     description="Server for cryptocurrency spread monitoring",
     version="1.0.0",
     lifespan=lifespan
