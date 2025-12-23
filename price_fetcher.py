@@ -32,6 +32,7 @@ JUPITER_USDT_AMOUNT = Decimal("100")
 
 MEXC_FUTURES_BASE = "https://contract.mexc.com"
 
+MATCHA_JWT_URL = "https://matcha.xyz/api/jwt"
 MATCHA_PRICE_URL = "https://matcha.xyz/api/gasless/price"
 MATCHA_USDT = "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2"
 MATCHA_USDT_AMOUNT = Decimal("100")
@@ -43,7 +44,7 @@ MATCHA_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/143.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
@@ -58,6 +59,11 @@ class PriceFetcher:
     def __init__(self):
         self._last_request_time = 0
         self._min_request_interval = 0.0  # NO throttling - parallel requests use different proxies
+        
+        # Matcha JWT token cache
+        self._matcha_jwt_token: Optional[str] = None
+        self._matcha_jwt_exp: float = 0  # Unix timestamp when token expires
+        self._matcha_scraper = None  # Reusable scraper for Matcha
     
     def _get_client(self, db: Session):
         """Get HTTP client with proxy configuration - creates new client each time for proper proxy rotation."""
@@ -308,16 +314,66 @@ class PriceFetcher:
         
         return None
     
-    def _get_matcha_client(self):
-        """Get cloudscraper client specifically for Matcha requests (no proxy needed)."""
-        scraper = cloudscraper.create_scraper(
-            browser={
-                "browser": "chrome",
-                "platform": "windows",
-                "mobile": False
-            }
-        )
-        return scraper
+    def _get_matcha_scraper(self):
+        """Get or create reusable cloudscraper client for Matcha requests."""
+        if self._matcha_scraper is None:
+            self._matcha_scraper = cloudscraper.create_scraper(
+                browser={
+                    "browser": "chrome",
+                    "platform": "windows",
+                    "mobile": False
+                }
+            )
+        return self._matcha_scraper
+    
+    def _refresh_matcha_jwt(self) -> bool:
+        """Refresh JWT token from Matcha API. Returns True if successful."""
+        scraper = self._get_matcha_scraper()
+        
+        try:
+            resp = scraper.get(
+                MATCHA_JWT_URL,
+                headers=MATCHA_HEADERS,
+                timeout=10.0,
+            )
+            
+            if resp.status_code != 200:
+                logger.warning(f"Matcha JWT: HTTP {resp.status_code}")
+                return False
+            
+            data = resp.json()
+            token = data.get("token")
+            exp = data.get("exp", 0)
+            
+            if token:
+                self._matcha_jwt_token = token
+                # Refresh 10 seconds before expiry to be safe
+                self._matcha_jwt_exp = exp - 10
+                logger.info(f"Matcha JWT: obtained new token (valid for ~{exp - time.time():.0f}s)")
+                return True
+            else:
+                logger.warning("Matcha JWT: no token in response")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Matcha JWT: error getting token: {e}")
+            # Reset scraper on error - might need fresh session
+            self._matcha_scraper = None
+            return False
+    
+    def _get_matcha_jwt(self) -> Optional[str]:
+        """Get cached JWT token, refreshing if expired."""
+        current_time = time.time()
+        
+        # Check if token is still valid
+        if self._matcha_jwt_token and current_time < self._matcha_jwt_exp:
+            return self._matcha_jwt_token
+        
+        # Token expired or doesn't exist - refresh
+        if self._refresh_matcha_jwt():
+            return self._matcha_jwt_token
+        
+        return None
     
     def get_matcha_price_usdt(
         self,
@@ -326,7 +382,7 @@ class PriceFetcher:
         token_decimals: int = MATCHA_DEFAULT_SELL_DECIMALS,
         max_retries: int = 3
     ) -> Optional[float]:
-        """Get token price in USDT via Matcha (0x). Uses cloudscraper to bypass Cloudflare."""
+        """Get token price in USDT via Matcha. Uses cached JWT token."""
         token_address = (token_address or "").strip()
         if not token_address:
             return None
@@ -338,10 +394,21 @@ class PriceFetcher:
             return None
         
         for attempt in range(max_retries):
-            # Use dedicated cloudscraper for Matcha (no proxy - direct request)
-            scraper = self._get_matcha_client()
-            
             try:
+                # Get cached or fresh JWT token
+                jwt_token = self._get_matcha_jwt()
+                if not jwt_token:
+                    logger.warning(f"Matcha: failed to get JWT (attempt {attempt + 1}/{max_retries})")
+                    # Reset scraper and try again
+                    self._matcha_scraper = None
+                    time.sleep(1)
+                    continue
+                
+                # Make price request with JWT in header
+                scraper = self._get_matcha_scraper()
+                headers = MATCHA_HEADERS.copy()
+                headers["X-Matcha-Jwt"] = jwt_token
+                
                 resp = scraper.get(
                     MATCHA_PRICE_URL,
                     params={
@@ -350,13 +417,21 @@ class PriceFetcher:
                         "buyToken": token_address,
                         "sellAmount": str(usdt_amount_raw),
                     },
-                    headers=MATCHA_HEADERS,
+                    headers=headers,
                     timeout=15.0,
                 )
                 
+                # If 401/403, token might be invalid - force refresh
+                if resp.status_code in (401, 403):
+                    logger.warning(f"Matcha: HTTP {resp.status_code} - forcing JWT refresh")
+                    self._matcha_jwt_token = None
+                    self._matcha_jwt_exp = 0
+                    time.sleep(0.5)
+                    continue
+                
                 if resp.status_code != 200:
                     logger.warning(f"Matcha: HTTP {resp.status_code} for {token_address} (attempt {attempt + 1}/{max_retries})")
-                    time.sleep(1)  # Small delay before retry
+                    time.sleep(1)
                     continue
                 
                 data = resp.json()
@@ -381,8 +456,10 @@ class PriceFetcher:
                 
             except Exception as e:
                 logger.error(f"Matcha: error for {token_address}: {e}")
+                # Reset scraper on error
+                self._matcha_scraper = None
                 if attempt < max_retries - 1:
-                    time.sleep(1)  # Small delay before retry
+                    time.sleep(1)
                     continue
         
         return None
