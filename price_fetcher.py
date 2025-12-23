@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 import cloudscraper
-from curl_cffi import requests as curl_requests
 from sqlalchemy.orm import Session
 
 from models import Token, SpreadHistory
@@ -320,19 +319,40 @@ class PriceFetcher:
         
         return None
     
-    def _refresh_matcha_jwt(self) -> bool:
-        """Refresh JWT token from Matcha API using curl_cffi (Chrome TLS fingerprint). Returns True if successful."""
+    def _get_matcha_scraper(self):
+        """Get or create reusable cloudscraper client for Matcha requests."""
+        if self._matcha_scraper is None:
+            self._matcha_scraper = cloudscraper.create_scraper(
+                browser={
+                    "browser": "chrome",
+                    "platform": "windows",
+                    "mobile": False
+                }
+            )
+        return self._matcha_scraper
+    
+    def _refresh_matcha_jwt(self, db: Session) -> bool:
+        """Refresh JWT token from Matcha API using cloudscraper with proxy. Returns True if successful."""
+        scraper = self._get_matcha_scraper()
+        
+        # Get proxy for Matcha request
+        proxy_url = proxy_manager.get_proxy_url(db)
+        proxies = None
+        if proxy_url:
+            proxies = {"http": proxy_url, "https": proxy_url}
+            logger.debug(f"Matcha JWT: using proxy {proxy_url}")
+        
         try:
-            # Use curl_cffi with Chrome impersonation to bypass TLS fingerprint detection
-            resp = curl_requests.get(
+            resp = scraper.get(
                 MATCHA_JWT_URL,
                 headers=MATCHA_HEADERS,
-                timeout=10.0,
-                impersonate="chrome"
+                proxies=proxies,
+                timeout=15.0,
             )
             
             if resp.status_code != 200:
                 logger.warning(f"Matcha JWT: HTTP {resp.status_code}")
+                proxy_manager.mark_proxy_failed(db, f"Matcha JWT HTTP {resp.status_code}")
                 return False
             
             data = resp.json()
@@ -343,6 +363,7 @@ class PriceFetcher:
                 self._matcha_jwt_token = token
                 # Refresh 10 seconds before expiry to be safe
                 self._matcha_jwt_exp = exp - 10
+                proxy_manager.mark_proxy_success(db)
                 logger.info(f"Matcha JWT: obtained new token (valid for ~{exp - time.time():.0f}s)")
                 return True
             else:
@@ -351,9 +372,12 @@ class PriceFetcher:
                 
         except Exception as e:
             logger.error(f"Matcha JWT: error getting token: {e}")
+            proxy_manager.mark_proxy_failed(db, str(e))
+            # Reset scraper on error - might need fresh session
+            self._matcha_scraper = None
             return False
     
-    def _get_matcha_jwt(self) -> Optional[str]:
+    def _get_matcha_jwt(self, db: Session) -> Optional[str]:
         """Get cached JWT token, refreshing if expired."""
         current_time = time.time()
         
@@ -362,7 +386,7 @@ class PriceFetcher:
             return self._matcha_jwt_token
         
         # Token expired or doesn't exist - refresh
-        if self._refresh_matcha_jwt():
+        if self._refresh_matcha_jwt(db):
             return self._matcha_jwt_token
         
         return None
@@ -388,7 +412,7 @@ class PriceFetcher:
         for attempt in range(max_retries):
             try:
                 # Get cached or fresh JWT token
-                jwt_token = self._get_matcha_jwt()
+                jwt_token = self._get_matcha_jwt(db)
                 if not jwt_token:
                     logger.warning(f"Matcha: failed to get JWT (attempt {attempt + 1}/{max_retries})")
                     # Reset scraper and try again
@@ -396,11 +420,18 @@ class PriceFetcher:
                     time.sleep(1)
                     continue
                 
-                # Make price request with JWT in header using curl_cffi
+                # Make price request with JWT in header using cloudscraper with proxy
+                scraper = self._get_matcha_scraper()
                 headers = MATCHA_HEADERS.copy()
                 headers["X-Matcha-Jwt"] = jwt_token
                 
-                resp = curl_requests.get(
+                # Get proxy for Matcha request
+                proxy_url = proxy_manager.get_proxy_url(db)
+                proxies = None
+                if proxy_url:
+                    proxies = {"http": proxy_url, "https": proxy_url}
+                
+                resp = scraper.get(
                     MATCHA_PRICE_URL,
                     params={
                         "chainId": MATCHA_CHAIN_ID,
@@ -409,8 +440,8 @@ class PriceFetcher:
                         "sellAmount": str(usdt_amount_raw),
                     },
                     headers=headers,
+                    proxies=proxies,
                     timeout=15.0,
-                    impersonate="chrome"
                 )
                 
                 # If 401/403, token might be invalid - force refresh
