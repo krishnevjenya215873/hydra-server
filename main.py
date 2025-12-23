@@ -1,0 +1,569 @@
+"""
+CRYPTOSPREAD Server - Main FastAPI Application
+Handles API endpoints, WebSocket connections, and background price fetching.
+"""
+
+import asyncio
+import logging
+import time
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Query, Header, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+from models import init_db, get_db, Token, SpreadHistory, Proxy, AdminUser, ServerSettings
+import models  # For accessing SessionLocal after init_db()
+from schemas import (
+    TokenCreate, TokenUpdate, TokenResponse,
+    ProxyCreate, ProxyBulkCreate, ProxyResponse,
+    SpreadHistoryResponse, SpreadHistoryPoint,
+    AdminLogin, AdminToken, ServerStats
+)
+from websocket_manager import connection_manager, handle_websocket_message
+from worker import price_worker
+from admin_routes import router as admin_router
+from proxy_manager import proxy_health_checker
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Server start time for uptime calculation
+SERVER_START_TIME = time.time()
+
+# Simple token-based auth for admin
+ADMIN_TOKENS: Dict[str, datetime] = {}
+TOKEN_EXPIRY_HOURS = 24
+
+
+def hash_password(password: str) -> str:
+    """Hash password with SHA256."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def verify_admin_token(token: str) -> bool:
+    """Verify admin token is valid and not expired."""
+    if token not in ADMIN_TOKENS:
+        return False
+    expiry = ADMIN_TOKENS[token]
+    if datetime.utcnow() > expiry:
+        del ADMIN_TOKENS[token]
+        return False
+    return True
+
+
+def get_admin_token(request: Request) -> str:
+    """Extract and verify admin token from header."""
+    authorization = request.headers.get("Authorization") or request.headers.get("authorization")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    token = authorization[7:]
+    if not verify_admin_token(token):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return token
+
+
+# Callback for worker to broadcast updates
+# Global event loop reference for cross-thread callbacks
+_main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def on_price_update(data: Dict[str, Any]):
+    """Called by worker when new price data is available.
+    
+    This is called from a background thread, so we need to use
+    call_soon_threadsafe to schedule the coroutine on the main event loop.
+    """
+    global _main_loop
+    if _main_loop is None or _main_loop.is_closed():
+        return
+    
+    try:
+        # Schedule the coroutine on the main event loop from another thread
+        asyncio.run_coroutine_threadsafe(
+            connection_manager.broadcast_update(data),
+            _main_loop
+        )
+    except Exception as e:
+        logger.error(f"Error scheduling broadcast: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler."""
+    global _main_loop
+    
+    # Startup
+    logger.info("Starting CRYPTOSPREAD server...")
+    
+    # Store reference to main event loop for cross-thread callbacks
+    _main_loop = asyncio.get_running_loop()
+    
+    # Run init_db in a thread pool to not block event loop
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        db_connected = await asyncio.get_event_loop().run_in_executor(pool, init_db)
+    
+    logger.info(f"Database connection result: {db_connected}, SessionLocal: {models.SessionLocal is not None}")
+    
+    # Create default admin if not exists (only if DB connected)
+    if db_connected and models.SessionLocal:
+        try:
+            db = models.SessionLocal()
+            try:
+                admin = db.query(AdminUser).filter(AdminUser.username == "admin").first()
+                if not admin:
+                    admin = AdminUser(
+                        username="admin",
+                        password_hash=hash_password("admin123")  # Change this!
+                    )
+                    db.add(admin)
+                    db.commit()
+                    logger.info("Default admin user created (username: admin, password: admin123)")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to create admin user: {e}")
+    else:
+        logger.warning("Database not connected, skipping admin user creation")
+    
+    # Start price worker only if DB is connected
+    if db_connected and models.SessionLocal:
+        price_worker.register_callback(on_price_update)
+        price_worker.start()
+        
+        # Start proxy health checker (проверка каждый час)
+        proxy_health_checker.start()
+    else:
+        logger.error("Database not connected, price worker and health checker will not start")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down CRYPTOSPREAD server...")
+    price_worker.stop()
+    proxy_health_checker.stop()
+
+
+app = FastAPI(
+    title="CRYPTOSPREAD Server",
+    description="Server for cryptocurrency spread monitoring",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS middleware
+# Include admin panel routes
+app.include_router(admin_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ============== Health Check ==============
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "ok", "timestamp": time.time()}
+
+
+@app.get("/stats", response_model=ServerStats)
+async def get_stats(db: Session = Depends(get_db)):
+    """Get server statistics."""
+    return ServerStats(
+        total_tokens=db.query(Token).count(),
+        active_tokens=db.query(Token).filter(Token.is_active == True).count(),
+        total_proxies=db.query(Proxy).count(),
+        active_proxies=db.query(Proxy).filter(Proxy.is_active == True).count(),
+        connected_clients=connection_manager.get_connection_count(),
+        uptime_seconds=time.time() - SERVER_START_TIME
+    )
+
+
+# ============== WebSocket ==============
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time price updates."""
+    await connection_manager.connect(websocket)
+    
+    # Send current data immediately
+    current_data = price_worker.get_latest_data()
+    if current_data:
+        await connection_manager.send_personal(websocket, {
+            "type": "initial_data",
+            "payload": current_data
+        })
+    
+    try:
+        while True:
+            message = await websocket.receive_text()
+            await handle_websocket_message(websocket, message)
+    except WebSocketDisconnect:
+        await connection_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        await connection_manager.disconnect(websocket)
+
+
+# ============== Token Endpoints ==============
+
+@app.get("/api/tokens", response_model=List[TokenResponse])
+async def list_tokens(
+    active_only: bool = Query(default=False),
+    db: Session = Depends(get_db)
+):
+    """List all tokens."""
+    query = db.query(Token)
+    if active_only:
+        query = query.filter(Token.is_active == True)
+    return query.all()
+
+
+@app.get("/api/tokens/{token_name}", response_model=TokenResponse)
+async def get_token(token_name: str, db: Session = Depends(get_db)):
+    """Get token by name."""
+    token = db.query(Token).filter(Token.name == token_name).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+    return token
+
+
+@app.post("/api/tokens", response_model=TokenResponse)
+async def create_token(token_data: TokenCreate, db: Session = Depends(get_db)):
+    """Create new token (from client app)."""
+    # Check if token already exists
+    existing = db.query(Token).filter(Token.name == token_data.name).first()
+    if existing:
+        # If exists but inactive, reactivate it
+        if not existing.is_active:
+            existing.is_active = True
+            for key, value in token_data.dict(exclude_unset=True).items():
+                if hasattr(existing, key):
+                    setattr(existing, key, value)
+            db.commit()
+            db.refresh(existing)
+            return existing
+        raise HTTPException(status_code=400, detail="Token already exists")
+    
+    token = Token(**token_data.dict())
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    logger.info(f"Token created: {token.name}")
+    return token
+
+
+@app.put("/api/tokens/{token_name}", response_model=TokenResponse)
+async def update_token(
+    token_name: str,
+    token_data: TokenUpdate,
+    db: Session = Depends(get_db)
+):
+    """Update token settings."""
+    token = db.query(Token).filter(Token.name == token_name).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+    
+    for key, value in token_data.dict(exclude_unset=True).items():
+        if hasattr(token, key):
+            setattr(token, key, value)
+    
+    db.commit()
+    db.refresh(token)
+    return token
+
+
+# Note: No public delete endpoint - only admin can delete
+
+
+# ============== Spread History ==============
+
+@app.get("/api/history/{token_name}/{dex_name}", response_model=SpreadHistoryResponse)
+async def get_spread_history(
+    token_name: str,
+    dex_name: str,
+    hours: int = Query(default=48, ge=1, le=48),
+    db: Session = Depends(get_db)
+):
+    """Get spread history for token/dex pair."""
+    token = db.query(Token).filter(Token.name == token_name).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+    
+    cutoff = time.time() - (hours * 3600)
+    
+    history = db.query(SpreadHistory).filter(
+        SpreadHistory.token_id == token.id,
+        SpreadHistory.dex_name == dex_name,
+        SpreadHistory.timestamp >= cutoff
+    ).order_by(SpreadHistory.timestamp.asc()).all()
+    
+    return SpreadHistoryResponse(
+        token_name=token_name,
+        dex_name=dex_name,
+        history=[
+            SpreadHistoryPoint(
+                timestamp=h.timestamp,
+                direct_spread=h.direct_spread,
+                reverse_spread=h.reverse_spread
+            )
+            for h in history
+        ]
+    )
+
+
+@app.get("/api/history/{token_name}")
+async def get_all_spread_history(
+    token_name: str,
+    hours: int = Query(default=48, ge=1, le=48),
+    db: Session = Depends(get_db)
+):
+    """Get spread history for all DEXes for a token."""
+    token = db.query(Token).filter(Token.name == token_name).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+    
+    cutoff = time.time() - (hours * 3600)
+    
+    history = db.query(SpreadHistory).filter(
+        SpreadHistory.token_id == token.id,
+        SpreadHistory.timestamp >= cutoff
+    ).order_by(SpreadHistory.timestamp.asc()).all()
+    
+    # Group by dex
+    result: Dict[str, List] = {}
+    for h in history:
+        if h.dex_name not in result:
+            result[h.dex_name] = []
+        result[h.dex_name].append([h.timestamp, h.direct_spread, h.reverse_spread])
+    
+    return {token_name: result}
+
+
+# ============== Admin Authentication ==============
+
+@app.post("/api/admin/login", response_model=AdminToken)
+async def admin_login(credentials: AdminLogin, db: Session = Depends(get_db)):
+    """Admin login endpoint."""
+    admin = db.query(AdminUser).filter(
+        AdminUser.username == credentials.username,
+        AdminUser.is_active == True
+    ).first()
+    
+    if not admin or admin.password_hash != hash_password(credentials.password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Generate token
+    token = secrets.token_urlsafe(32)
+    ADMIN_TOKENS[token] = datetime.utcnow() + timedelta(hours=TOKEN_EXPIRY_HOURS)
+    
+    return AdminToken(access_token=token)
+
+
+# ============== Admin: Token Management ==============
+
+@app.delete("/api/admin/tokens/{token_name}")
+async def admin_delete_token(
+    token_name: str,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Delete token (admin only)."""
+    
+    token = db.query(Token).filter(Token.name == token_name).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token not found")
+    
+    db.delete(token)
+    db.commit()
+    logger.info(f"Token deleted by admin: {token_name}")
+    return {"status": "deleted", "token": token_name}
+
+
+# ============== Admin: Proxy Management ==============
+
+@app.get("/api/admin/proxies", response_model=List[ProxyResponse])
+async def admin_list_proxies(
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """List all proxies (admin only)."""
+    return db.query(Proxy).all()
+
+
+@app.post("/api/admin/proxies", response_model=ProxyResponse)
+async def admin_add_proxy(
+    proxy_data: ProxyCreate,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Add single proxy (admin only)."""
+    
+    proxy = Proxy(**proxy_data.dict())
+    db.add(proxy)
+    db.commit()
+    db.refresh(proxy)
+    return proxy
+
+
+@app.post("/api/admin/proxies/bulk")
+async def admin_add_proxies_bulk(
+    data: ProxyBulkCreate,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Add multiple proxies at once (admin only)."""
+    
+    added = 0
+    for proxy_string in data.proxies:
+        proxy_string = proxy_string.strip()
+        if not proxy_string:
+            continue
+        
+        # Check if already exists
+        existing = db.query(Proxy).filter(Proxy.proxy_string == proxy_string).first()
+        if existing:
+            continue
+        
+        proxy = Proxy(
+            proxy_string=proxy_string,
+            protocol=data.protocol
+        )
+        db.add(proxy)
+        added += 1
+    
+    db.commit()
+    logger.info(f"Added {added} proxies")
+    return {"status": "ok", "added": added}
+
+
+@app.delete("/api/admin/proxies/{proxy_id}")
+async def admin_delete_proxy(
+    proxy_id: int,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Delete proxy (admin only)."""
+    
+    proxy = db.query(Proxy).filter(Proxy.id == proxy_id).first()
+    if not proxy:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+    
+    db.delete(proxy)
+    db.commit()
+    return {"status": "deleted", "proxy_id": proxy_id}
+
+
+@app.put("/api/admin/proxies/{proxy_id}/toggle")
+async def admin_toggle_proxy(
+    proxy_id: int,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Toggle proxy active status (admin only)."""
+    
+    proxy = db.query(Proxy).filter(Proxy.id == proxy_id).first()
+    if not proxy:
+        raise HTTPException(status_code=404, detail="Proxy not found")
+    
+    proxy.is_active = not proxy.is_active
+    db.commit()
+    return {"status": "ok", "is_active": proxy.is_active}
+
+
+@app.delete("/api/admin/proxies")
+async def admin_clear_proxies(
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Clear all proxies (admin only)."""
+    
+    count = db.query(Proxy).delete()
+    db.commit()
+    logger.info(f"Cleared {count} proxies")
+    return {"status": "ok", "deleted": count}
+
+
+@app.get("/api/admin/proxies/health")
+async def admin_get_proxy_health(
+    admin_token: str = Depends(get_admin_token)
+):
+    """Получить результаты последней проверки прокси."""
+    return proxy_health_checker.get_last_results()
+
+
+@app.post("/api/admin/proxies/health/check")
+async def admin_force_proxy_check(
+    admin_token: str = Depends(get_admin_token)
+):
+    """Принудительно запустить проверку всех прокси (admin only)."""
+    results = proxy_health_checker.force_check()
+    return {
+        "status": "ok",
+        "results": results,
+        "working": len([r for r in results if r["working"]]),
+        "total": len(results)
+    }
+
+
+# ============== Admin: Settings ==============
+
+@app.get("/api/admin/settings")
+async def admin_get_settings(
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Get server settings (admin only)."""
+    
+    settings = db.query(ServerSettings).all()
+    return {s.key: s.value for s in settings}
+
+
+@app.put("/api/admin/settings/{key}")
+async def admin_set_setting(
+    key: str,
+    value: str,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Set server setting (admin only)."""
+    
+    setting = db.query(ServerSettings).filter(ServerSettings.key == key).first()
+    if setting:
+        setting.value = value
+    else:
+        setting = ServerSettings(key=key, value=value)
+        db.add(setting)
+    
+    db.commit()
+    
+    # Apply setting if it's interval
+    if key == "poll_interval":
+        try:
+            price_worker.set_interval(float(value))
+        except ValueError:
+            pass
+    
+    return {"status": "ok", "key": key, "value": value}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
