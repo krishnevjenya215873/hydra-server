@@ -354,9 +354,16 @@ class PriceFetcher:
                 "browser": "chrome",
                 "platform": "windows",
                 "mobile": False
-            }
+            },
+            interpreter='native'
         )
-        logger.info(f"Scraper created: browser=chrome, platform=windows, mobile=False")
+        # Log cloudscraper version and interpreter info
+        import ssl
+        import sys
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"OpenSSL version: {ssl.OPENSSL_VERSION}")
+        logger.info(f"Cloudscraper version: {cloudscraper.__version__}")
+        logger.info(f"Scraper created: browser=chrome, platform=windows, mobile=False, interpreter=native")
         
         try:
             logger.info(f"Making GET request to {MATCHA_JWT_URL}...")
