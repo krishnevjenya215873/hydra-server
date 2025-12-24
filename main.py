@@ -46,8 +46,15 @@ SERVER_START_TIME = time.time()
 # Solana RPC for getting token decimals
 SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
 
+# Cache for token decimals to avoid repeated RPC calls
+DECIMALS_CACHE: Dict[str, int] = {}
+
 def get_solana_token_decimals(mint_address: str) -> int:
-    """Get token decimals from Solana RPC. Returns 6 as default if fails."""
+    """Get token decimals from Solana RPC with caching. Returns 6 as default if fails."""
+    # Check cache first
+    if mint_address in DECIMALS_CACHE:
+        return DECIMALS_CACHE[mint_address]
+    
     import httpx
     try:
         response = httpx.post(
@@ -58,18 +65,20 @@ def get_solana_token_decimals(mint_address: str) -> int:
                 "method": "getTokenSupply",
                 "params": [mint_address]
             },
-            timeout=5.0
+            timeout=3.0  # Reduced timeout for faster response
         )
         if response.status_code == 200:
             data = response.json()
             decimals = data.get("result", {}).get("value", {}).get("decimals")
             if decimals is not None:
+                DECIMALS_CACHE[mint_address] = int(decimals)
                 logger.info(f"Solana RPC: decimals for {mint_address} = {decimals}")
                 return int(decimals)
     except Exception as e:
         logger.warning(f"Solana RPC error for {mint_address}: {e}")
     
     # Default to 6 (most common for Solana tokens)
+    DECIMALS_CACHE[mint_address] = 6
     logger.warning(f"Using default decimals=6 for {mint_address}")
     return 6
 
