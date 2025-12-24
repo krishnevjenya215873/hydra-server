@@ -147,6 +147,29 @@ class AdminToken(BaseModel):
     token_type: str = "bearer"
 
 
+# ============== Product Key Schemas ==============
+
+class ProductKeyCreate(BaseModel):
+    username: str = Field(..., description="Username for the key")
+
+
+class ProductKeyResponse(BaseModel):
+    id: int
+    username: str
+    key: str
+    is_active: bool
+    is_used: bool
+    used_at: Optional[datetime]
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class ProductKeyVerify(BaseModel):
+    key: str = Field(..., description="Product key to verify")
+
+
 class ServerStats(BaseModel):
     total_tokens: int
     active_tokens: int

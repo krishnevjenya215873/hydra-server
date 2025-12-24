@@ -102,6 +102,19 @@ class AdminUser(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ProductKey(Base):
+    """Product keys for client activation."""
+    __tablename__ = "product_keys"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(100), nullable=False)  # Имя пользователя
+    key = Column(String(100), unique=True, nullable=False, index=True)  # Ключ продукта
+    is_active = Column(Boolean, default=True)
+    is_used = Column(Boolean, default=False)  # Был ли ключ активирован
+    used_at = Column(DateTime, nullable=True)  # Когда был активирован
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ServerSettings(Base):
     """Global server settings."""
     __tablename__ = "server_settings"

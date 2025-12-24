@@ -18,13 +18,14 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from models import init_db, get_db, Token, SpreadHistory, Proxy, AdminUser, ServerSettings
+from models import init_db, get_db, Token, SpreadHistory, Proxy, AdminUser, ServerSettings, ProductKey
 import models  # For accessing SessionLocal after init_db()
 from schemas import (
     TokenCreate, TokenUpdate, TokenResponse,
     ProxyCreate, ProxyBulkCreate, ProxyResponse,
     SpreadHistoryResponse, SpreadHistoryPoint,
-    AdminLogin, AdminToken, ServerStats
+    AdminLogin, AdminToken, ServerStats,
+    ProductKeyCreate, ProductKeyResponse, ProductKeyVerify
 )
 from websocket_manager import connection_manager, handle_websocket_message
 from worker import price_worker
@@ -579,6 +580,110 @@ async def admin_set_setting(
             pass
     
     return {"status": "ok", "key": key, "value": value}
+
+
+# ============== Admin: Product Keys Management ==============
+
+def generate_product_key() -> str:
+    """Generate random product key in format XXXX-XXXX-XXXX-XXXX."""
+    import string
+    import random
+    chars = string.ascii_uppercase + string.digits
+    parts = [''.join(random.choices(chars, k=4)) for _ in range(4)]
+    return '-'.join(parts)
+
+
+@app.get("/api/admin/keys", response_model=List[ProductKeyResponse])
+async def admin_list_keys(
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """List all product keys (admin only)."""
+    return db.query(ProductKey).order_by(ProductKey.created_at.desc()).all()
+
+
+@app.post("/api/admin/keys", response_model=ProductKeyResponse)
+async def admin_create_key(
+    data: ProductKeyCreate,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Create new product key (admin only)."""
+    # Generate unique key
+    key = generate_product_key()
+    while db.query(ProductKey).filter(ProductKey.key == key).first():
+        key = generate_product_key()
+    
+    product_key = ProductKey(
+        username=data.username,
+        key=key
+    )
+    db.add(product_key)
+    db.commit()
+    db.refresh(product_key)
+    logger.info(f"Product key created for user: {data.username}")
+    return product_key
+
+
+@app.delete("/api/admin/keys/{key_id}")
+async def admin_delete_key(
+    key_id: int,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Delete product key (admin only)."""
+    key = db.query(ProductKey).filter(ProductKey.id == key_id).first()
+    if not key:
+        raise HTTPException(status_code=404, detail="Key not found")
+    
+    db.delete(key)
+    db.commit()
+    return {"status": "deleted", "key_id": key_id}
+
+
+@app.put("/api/admin/keys/{key_id}/toggle")
+async def admin_toggle_key(
+    key_id: int,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Toggle product key active status (admin only)."""
+    key = db.query(ProductKey).filter(ProductKey.id == key_id).first()
+    if not key:
+        raise HTTPException(status_code=404, detail="Key not found")
+    
+    key.is_active = not key.is_active
+    db.commit()
+    return {"status": "ok", "is_active": key.is_active}
+
+
+# ============== Public: Product Key Verification ==============
+
+@app.post("/api/verify-key")
+async def verify_product_key(
+    data: ProductKeyVerify,
+    db: Session = Depends(get_db)
+):
+    """Verify product key (public endpoint for client)."""
+    key = db.query(ProductKey).filter(
+        ProductKey.key == data.key,
+        ProductKey.is_active == True
+    ).first()
+    
+    if not key:
+        raise HTTPException(status_code=401, detail="Invalid or inactive key")
+    
+    # Mark key as used if not already
+    if not key.is_used:
+        key.is_used = True
+        key.used_at = datetime.utcnow()
+        db.commit()
+    
+    return {
+        "status": "valid",
+        "username": key.username,
+        "key": key.key
+    }
 
 
 if __name__ == "__main__":
