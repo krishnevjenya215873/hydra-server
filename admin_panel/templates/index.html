@@ -424,71 +424,47 @@ user2:pass2@192.168.1.2:1080"></textarea>
         <!-- Default Tokens Tab -->
         <div class="tab-content" id="tab-default-tokens">
             <div class="card">
-                <h2>Добавить токен по умолчанию</h2>
-                <p style="color: var(--text-secondary); margin-bottom: 15px;">Эти токены автоматически появятся у всех новых пользователей при первом запуске программы.</p>
-                <div class="inline-form" style="flex-wrap: wrap; gap: 10px;">
-                    <div class="form-group" style="min-width: 150px;">
-                        <label>Имя токена</label>
-                        <input type="text" id="defaultTokenName" placeholder="SOL-USDT">
+                <h2>Массовое добавление токенов</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 15px;">Введите адреса контрактов (каждый с новой строки). Система автоматически определит имя токена и параметры.</p>
+                
+                <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                    <div class="form-group" style="flex: 1; min-width: 300px;">
+                        <label>Адреса контрактов</label>
+                        <textarea id="bulkTokenAddresses" rows="8" placeholder="So11111111111111111111111111111111111111112
+EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+..." style="width: 100%; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; color: var(--text-primary); font-family: monospace; resize: vertical;"></textarea>
                     </div>
-                    <div class="form-group" style="min-width: 100px;">
-                        <label>Base</label>
-                        <input type="text" id="defaultTokenBase" placeholder="SOL">
-                    </div>
-                    <div class="form-group" style="min-width: 100px;">
-                        <label>Quote</label>
-                        <input type="text" id="defaultTokenQuote" placeholder="USDT" value="USDT">
-                    </div>
-                    <button class="btn btn-primary" onclick="addDefaultToken()" style="align-self: flex-end;">Добавить</button>
-                </div>
-                <div style="margin-top: 15px;">
-                    <details>
-                        <summary style="cursor: pointer; color: var(--accent-blue);">Дополнительные настройки</summary>
-                        <div style="margin-top: 15px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">
-                            <div class="form-group">
-                                <label>Jupiter Mint</label>
-                                <input type="text" id="defaultTokenJupiterMint" placeholder="Адрес минта">
-                            </div>
-                            <div class="form-group">
-                                <label>Jupiter Decimals</label>
-                                <input type="number" id="defaultTokenJupiterDecimals" placeholder="9">
-                            </div>
-                            <div class="form-group">
-                                <label>BSC Address</label>
-                                <input type="text" id="defaultTokenBscAddress" placeholder="Адрес BSC">
-                            </div>
-                            <div class="form-group">
-                                <label>Matcha Address</label>
-                                <input type="text" id="defaultTokenMatchaAddress" placeholder="Адрес Matcha">
-                            </div>
-                            <div class="form-group">
-                                <label>Matcha Decimals</label>
-                                <input type="number" id="defaultTokenMatchaDecimals" placeholder="18">
-                            </div>
-                            <div class="form-group">
-                                <label>CoinGecko ID</label>
-                                <input type="text" id="defaultTokenCgId" placeholder="solana">
-                            </div>
-                            <div class="form-group">
-                                <label>DEX (через запятую)</label>
-                                <input type="text" id="defaultTokenDexes" placeholder="jupiter,pancake,matcha">
-                            </div>
+                    
+                    <div style="min-width: 200px;">
+                        <div class="form-group">
+                            <label>DEX</label>
+                            <select id="bulkTokenDex" style="width: 100%; padding: 10px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary);">
+                                <option value="jupiter">Jupiter (Solana)</option>
+                                <option value="pancake">PancakeSwap (BSC)</option>
+                                <option value="matcha">Matcha (Base)</option>
+                            </select>
                         </div>
-                    </details>
+                        
+                        <button class="btn btn-primary" onclick="bulkAddDefaultTokens()" style="width: 100%; margin-top: 10px;">
+                            Добавить все
+                        </button>
+                    </div>
                 </div>
+                
+                <div id="bulkTokenResults" style="margin-top: 15px;"></div>
                 <div class="success-msg" id="defaultTokenSuccess"></div>
             </div>
             
             <div class="card">
                 <h2>Список токенов по умолчанию</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 15px;">Эти токены автоматически появятся у всех новых пользователей при первом запуске программы.</p>
                 <table>
                     <thead>
                         <tr>
-                            <th>ID</th>
                             <th>Имя</th>
                             <th>Base/Quote</th>
                             <th>DEX</th>
-                            <th>Создан</th>
+                            <th>Адрес</th>
                             <th>Действия</th>
                         </tr>
                     </thead>
@@ -915,79 +891,88 @@ user2:pass2@192.168.1.2:1080"></textarea>
                 const response = await apiCall('/api/admin/default-tokens');
                 const tokens = await response.json();
                 const tbody = document.getElementById('defaultTokensTable');
-                tbody.innerHTML = tokens.map(t => `
+                tbody.innerHTML = tokens.map(t => {
+                    // Определяем адрес для отображения
+                    let address = t.jupiter_mint || t.bsc_address || t.matcha_address || '-';
+                    if (address && address.length > 20) {
+                        address = address.substring(0, 8) + '...' + address.substring(address.length - 6);
+                    }
+                    return `
                     <tr>
-                        <td>${t.id}</td>
-                        <td>${t.name}</td>
+                        <td><strong>${t.name}</strong></td>
                         <td>${t.base}/${t.quote}</td>
                         <td>${(t.dexes || []).join(', ') || '-'}</td>
-                        <td>${new Date(t.created_at).toLocaleString()}</td>
+                        <td style="font-family: monospace; font-size: 12px;" title="${t.jupiter_mint || t.bsc_address || t.matcha_address || ''}">${address}</td>
                         <td class="actions">
                             <button class="btn btn-danger btn-small" onclick="deleteDefaultToken(${t.id})">
                                 Удалить
                             </button>
                         </td>
                     </tr>
-                `).join('');
+                `}).join('');
             } catch (error) {
                 console.error('Error loading default tokens:', error);
             }
         }
         
-        async function addDefaultToken() {
-            const name = document.getElementById('defaultTokenName').value.trim();
-            const base = document.getElementById('defaultTokenBase').value.trim();
-            const quote = document.getElementById('defaultTokenQuote').value.trim() || 'USDT';
+        async function bulkAddDefaultTokens() {
+            const addressesText = document.getElementById('bulkTokenAddresses').value.trim();
+            const dex = document.getElementById('bulkTokenDex').value;
             
-            if (!name || !base) {
-                alert('Введите имя токена и Base');
+            if (!addressesText) {
+                alert('Введите адреса контрактов');
                 return;
             }
             
-            // Дополнительные поля
-            const jupiterMint = document.getElementById('defaultTokenJupiterMint').value.trim() || null;
-            const jupiterDecimals = document.getElementById('defaultTokenJupiterDecimals').value || null;
-            const bscAddress = document.getElementById('defaultTokenBscAddress').value.trim() || null;
-            const matchaAddress = document.getElementById('defaultTokenMatchaAddress').value.trim() || null;
-            const matchaDecimals = document.getElementById('defaultTokenMatchaDecimals').value || null;
-            const cgId = document.getElementById('defaultTokenCgId').value.trim() || null;
-            const dexesStr = document.getElementById('defaultTokenDexes').value.trim();
-            const dexes = dexesStr ? dexesStr.split(',').map(d => d.trim()).filter(d => d) : null;
+            const addresses = addressesText.split('\n').map(a => a.trim()).filter(a => a);
+            
+            if (addresses.length === 0) {
+                alert('Введите хотя бы один адрес');
+                return;
+            }
+            
+            const resultsDiv = document.getElementById('bulkTokenResults');
+            resultsDiv.innerHTML = '<p style="color: var(--accent-blue);">Обработка ' + addresses.length + ' адресов...</p>';
             
             try {
-                const response = await apiCall('/api/admin/default-tokens', 'POST', {
-                    name,
-                    base,
-                    quote,
-                    jupiter_mint: jupiterMint,
-                    jupiter_decimals: jupiterDecimals ? parseInt(jupiterDecimals) : null,
-                    bsc_address: bscAddress,
-                    matcha_address: matchaAddress,
-                    matcha_decimals: matchaDecimals ? parseInt(matchaDecimals) : null,
-                    cg_id: cgId,
-                    dexes
+                const response = await apiCall('/api/admin/default-tokens/bulk', 'POST', {
+                    addresses,
+                    dex
                 });
                 const result = await response.json();
-                document.getElementById('defaultTokenSuccess').textContent = `Токен ${result.name} добавлен!`;
                 
-                // Очищаем форму
-                document.getElementById('defaultTokenName').value = '';
-                document.getElementById('defaultTokenBase').value = '';
-                document.getElementById('defaultTokenQuote').value = 'USDT';
-                document.getElementById('defaultTokenJupiterMint').value = '';
-                document.getElementById('defaultTokenJupiterDecimals').value = '';
-                document.getElementById('defaultTokenBscAddress').value = '';
-                document.getElementById('defaultTokenMatchaAddress').value = '';
-                document.getElementById('defaultTokenMatchaDecimals').value = '';
-                document.getElementById('defaultTokenCgId').value = '';
-                document.getElementById('defaultTokenDexes').value = '';
+                let html = '';
+                
+                if (result.success && result.success.length > 0) {
+                    html += '<div style="margin-bottom: 10px;"><strong style="color: var(--accent-green);">Успешно добавлено: ' + result.success.length + '</strong></div>';
+                    html += '<ul style="color: var(--accent-green); margin-left: 20px;">';
+                    result.success.forEach(s => {
+                        html += `<li>${s.name} (${s.symbol}) - ${s.dexes.join(', ')}</li>`;
+                    });
+                    html += '</ul>';
+                }
+                
+                if (result.failed && result.failed.length > 0) {
+                    html += '<div style="margin-top: 10px; margin-bottom: 10px;"><strong style="color: var(--accent-red);">Не удалось добавить: ' + result.failed.length + '</strong></div>';
+                    html += '<ul style="color: var(--accent-red); margin-left: 20px;">';
+                    result.failed.forEach(f => {
+                        const shortAddr = f.address.length > 20 ? f.address.substring(0, 8) + '...' + f.address.substring(f.address.length - 6) : f.address;
+                        html += `<li>${shortAddr}: ${f.error}</li>`;
+                    });
+                    html += '</ul>';
+                }
+                
+                resultsDiv.innerHTML = html;
+                
+                // Очищаем поле ввода если все успешно
+                if (result.failed.length === 0) {
+                    document.getElementById('bulkTokenAddresses').value = '';
+                }
                 
                 loadDefaultTokens();
-                setTimeout(() => {
-                    document.getElementById('defaultTokenSuccess').textContent = '';
-                }, 5000);
+                
             } catch (error) {
-                alert('Ошибка добавления токена: ' + error.message);
+                resultsDiv.innerHTML = `<p style="color: var(--accent-red);">Ошибка: ${error.message}</p>`;
             }
         }
         

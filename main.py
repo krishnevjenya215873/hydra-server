@@ -706,6 +706,143 @@ async def admin_create_default_token(
     return default_token
 
 
+@app.post("/api/admin/default-tokens/bulk")
+async def admin_bulk_add_default_tokens(
+    request: Request,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Массовое добавление токенов по умолчанию по адресам контрактов."""
+    import httpx
+    
+    body = await request.json()
+    addresses = body.get("addresses", [])
+    dex = body.get("dex", "jupiter")  # jupiter, pancake, matcha
+    
+    if not addresses:
+        raise HTTPException(status_code=400, detail="Список адресов пуст")
+    
+    results = {
+        "success": [],
+        "failed": []
+    }
+    
+    for address in addresses:
+        address = address.strip()
+        if not address:
+            continue
+        
+        try:
+            # Получаем информацию о токене через DexScreener
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}")
+                
+                if resp.status_code != 200:
+                    results["failed"].append({"address": address, "error": f"DexScreener HTTP {resp.status_code}"})
+                    continue
+                
+                data = resp.json()
+                pairs = data.get("pairs") or []
+                
+                if not pairs:
+                    results["failed"].append({"address": address, "error": "Токен не найден на DexScreener"})
+                    continue
+                
+                # Берём первую пару с наибольшей ликвидностью
+                best_pair = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0))
+                
+                base_token = best_pair.get("baseToken") or {}
+                token_symbol = base_token.get("symbol", "UNKNOWN")
+                token_name = f"{token_symbol}-USDT"
+                
+                # Проверяем, нет ли уже такого токена
+                existing = db.query(DefaultToken).filter(DefaultToken.name == token_name).first()
+                if existing:
+                    results["failed"].append({"address": address, "error": f"Токен {token_name} уже существует"})
+                    continue
+                
+                # Определяем параметры в зависимости от сети
+                chain_id = best_pair.get("chainId", "")
+                dex_id = best_pair.get("dexId", "")
+                
+                jupiter_mint = None
+                jupiter_decimals = None
+                bsc_address = None
+                matcha_address = None
+                matcha_decimals = None
+                dexes = []
+                
+                # Solana / Jupiter
+                if chain_id == "solana" or dex == "jupiter":
+                    jupiter_mint = address
+                    # Пытаемся получить decimals
+                    try:
+                        decimals_resp = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}")
+                        if decimals_resp.status_code == 200:
+                            dec_data = decimals_resp.json()
+                            if dec_data.get("pairs"):
+                                base_t = dec_data["pairs"][0].get("baseToken", {})
+                                # DexScreener не всегда даёт decimals, ставим 9 по умолчанию для Solana
+                                jupiter_decimals = 9
+                    except:
+                        jupiter_decimals = 9
+                    dexes.append("jupiter")
+                
+                # BSC / PancakeSwap
+                if chain_id == "bsc" or dex == "pancake":
+                    bsc_address = address
+                    dexes.append("pancake")
+                
+                # Base / Matcha
+                if chain_id == "base" or dex == "matcha":
+                    matcha_address = address
+                    matcha_decimals = 18  # По умолчанию для ERC-20
+                    dexes.append("matcha")
+                
+                # Если DEX не определился автоматически, используем выбранный
+                if not dexes:
+                    if dex == "jupiter":
+                        jupiter_mint = address
+                        jupiter_decimals = 9
+                        dexes = ["jupiter"]
+                    elif dex == "pancake":
+                        bsc_address = address
+                        dexes = ["pancake"]
+                    elif dex == "matcha":
+                        matcha_address = address
+                        matcha_decimals = 18
+                        dexes = ["matcha"]
+                
+                # Создаём токен
+                default_token = DefaultToken(
+                    name=token_name,
+                    base=token_symbol,
+                    quote="USDT",
+                    dexes=dexes,
+                    jupiter_mint=jupiter_mint,
+                    jupiter_decimals=jupiter_decimals,
+                    bsc_address=bsc_address,
+                    matcha_address=matcha_address,
+                    matcha_decimals=matcha_decimals,
+                    is_active=True
+                )
+                db.add(default_token)
+                db.commit()
+                db.refresh(default_token)
+                
+                results["success"].append({
+                    "address": address,
+                    "name": token_name,
+                    "symbol": token_symbol,
+                    "dexes": dexes
+                })
+                
+        except Exception as e:
+            results["failed"].append({"address": address, "error": str(e)})
+    
+    return results
+
+
 @app.delete("/api/admin/default-tokens/{token_id}")
 async def admin_delete_default_token(
     token_id: int,
