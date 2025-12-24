@@ -267,6 +267,26 @@ def migrate_default_tokens(db):
                     print(f"Failed to recreate table: {e2}")
 
 
+def migrate_add_mexc_symbol(db):
+    """Add mexc_symbol column to tokens table if it doesn't exist."""
+    from sqlalchemy import inspect
+    
+    inspector = inspect(db.bind)
+    
+    if 'tokens' in inspector.get_table_names():
+        columns = [col['name'] for col in inspector.get_columns('tokens')]
+        
+        if 'mexc_symbol' not in columns:
+            print("Adding mexc_symbol column to tokens table...")
+            try:
+                db.execute(text("ALTER TABLE tokens ADD COLUMN mexc_symbol VARCHAR(50)"))
+                db.commit()
+                print("mexc_symbol column added successfully")
+            except Exception as e:
+                print(f"Failed to add mexc_symbol column: {e}")
+                db.rollback()
+
+
 def init_db():
     """Initialize database tables with retry."""
     import time
@@ -282,9 +302,10 @@ def init_db():
         sys.stdout.flush()
         if create_db_engine():
             try:
-                # Run migration before creating tables
+                # Run migrations before creating tables
                 db = SessionLocal()
                 migrate_default_tokens(db)
+                migrate_add_mexc_symbol(db)
                 db.close()
                 
                 Base.metadata.create_all(bind=engine)
