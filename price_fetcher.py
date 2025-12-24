@@ -31,6 +31,10 @@ JUPITER_USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 JUPITER_USDT_DECIMALS = 6
 JUPITER_USDT_AMOUNT = Decimal("100")
 
+# Jupiter price cache
+_jupiter_price_cache: Dict[str, Tuple[float, float]] = {}  # mint -> (price, timestamp)
+JUPITER_CACHE_TTL = 1.0  # Cache valid for 1 second
+
 MEXC_FUTURES_BASE = "https://contract.mexc.com"
 
 MATCHA_JWT_URL = "https://matcha.xyz/api/jwt"
@@ -97,6 +101,72 @@ class PriceFetcher:
         """Throttling disabled - each request uses its own proxy."""
         pass  # No throttling needed with proxy rotation
     
+    # MEXC price cache for batch fetching
+    _mexc_prices_cache: Dict[str, Tuple[float, float]] = {}
+    _mexc_cache_time: float = 0
+    _mexc_cache_ttl: float = 1.0  # Cache valid for 1 second
+    
+    def get_all_mexc_prices(self, db: Session, max_retries: int = 2) -> Dict[str, Tuple[float, float]]:
+        """Get ALL futures prices from MEXC in ONE request. Returns dict of symbol -> (bid, ask)."""
+        current_time = time.time()
+        
+        # Return cached data if still valid
+        if current_time - self._mexc_cache_time < self._mexc_cache_ttl and self._mexc_prices_cache:
+            return self._mexc_prices_cache
+        
+        for attempt in range(max_retries):
+            try:
+                proxy_url = proxy_manager.get_proxy_url(db)
+                transport = None
+                if proxy_url:
+                    transport = httpx.HTTPTransport(proxy=proxy_url)
+                
+                with httpx.Client(timeout=10.0, transport=transport) as client:
+                    r = client.get(f"{MEXC_FUTURES_BASE}/api/v1/contract/ticker")
+                
+                if r.status_code != 200:
+                    logger.warning(f"MEXC batch: HTTP {r.status_code} (attempt {attempt + 1}/{max_retries})")
+                    continue
+                
+                j = r.json()
+                
+                if j.get("success") and j.get("code") == 0 and j.get("data"):
+                    prices = {}
+                    for item in j["data"]:
+                        symbol = item.get("symbol")
+                        bid = item.get("bid1")
+                        ask = item.get("ask1")
+                        if symbol and bid is not None and ask is not None:
+                            prices[symbol] = (float(bid), float(ask))
+                    
+                    # Update cache
+                    self._mexc_prices_cache = prices
+                    self._mexc_cache_time = current_time
+                    proxy_manager.mark_proxy_success(db)
+                    logger.debug(f"MEXC batch: fetched {len(prices)} prices")
+                    return prices
+                
+                logger.warning(f"MEXC batch: unsuccessful response: {j}")
+                return {}
+                
+            except Exception as e:
+                logger.error(f"MEXC batch: error: {e}")
+                if attempt < max_retries - 1:
+                    continue
+        
+        return {}
+    
+    def get_mexc_price_from_cache(self, base: str, quote: str = "USDT", price_scale: Optional[int] = None) -> Tuple[Optional[float], Optional[float]]:
+        """Get MEXC price from cached batch data."""
+        symbol = f"{base.upper()}_{quote.upper()}"
+        if symbol in self._mexc_prices_cache:
+            bid, ask = self._mexc_prices_cache[symbol]
+            if isinstance(price_scale, int) and price_scale >= 0:
+                bid = round(bid, price_scale)
+                ask = round(ask, price_scale)
+            return bid, ask
+        return None, None
+    
     def get_mexc_price(
         self, 
         db: Session,
@@ -105,7 +175,25 @@ class PriceFetcher:
         price_scale: Optional[int] = None,
         max_retries: int = 2
     ) -> Tuple[Optional[float], Optional[float]]:
-        """Get futures price from MEXC (bid, ask). Uses httpx with proxy."""
+        """Get futures price from MEXC (bid, ask). Now uses batch cache."""
+        # First try to get from cache
+        cached = self.get_mexc_price_from_cache(base, quote, price_scale)
+        if cached[0] is not None:
+            return cached
+        
+        # If not in cache, fetch all prices and try again
+        self.get_all_mexc_prices(db, max_retries)
+        return self.get_mexc_price_from_cache(base, quote, price_scale)
+    
+    def get_mexc_price_single(
+        self, 
+        db: Session,
+        base: str, 
+        quote: str = "USDT", 
+        price_scale: Optional[int] = None,
+        max_retries: int = 2
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Get futures price from MEXC (bid, ask) - single request fallback. Uses httpx with proxy."""
         symbol = f"{base.upper()}_{quote.upper()}"
         
         for attempt in range(max_retries):
@@ -253,10 +341,17 @@ class PriceFetcher:
         decimals: int,
         max_retries: int = 2
     ) -> Optional[float]:
-        """Get token price in USDT via Jupiter. Uses httpx with proxy (no cloudscraper)."""
+        """Get token price in USDT via Jupiter Quote API. Uses httpx with proxy and caching."""
         mint = (mint or "").strip()
-        if not mint or decimals is None or decimals < 0:
+        if not mint:
             return None
+        
+        # Check cache first
+        current_time = time.time()
+        if mint in _jupiter_price_cache:
+            cached_price, cached_time = _jupiter_price_cache[mint]
+            if current_time - cached_time < JUPITER_CACHE_TTL:
+                return cached_price
         
         try:
             usdt_amount_raw = int(JUPITER_USDT_AMOUNT * (Decimal(10) ** JUPITER_USDT_DECIMALS))
@@ -307,10 +402,14 @@ class PriceFetcher:
                     return None
                 
                 price = JUPITER_USDT_AMOUNT / token_amount
+                price_float = float(price)
+                
+                # Cache the result
+                _jupiter_price_cache[mint] = (price_float, time.time())
                 
                 proxy_manager.mark_proxy_success(db)
-                logger.debug(f"Jupiter: 1 TOKEN ({mint}) = {float(price):.8f} USDT")
-                return float(price)
+                logger.debug(f"Jupiter: 1 TOKEN ({mint}) = {price_float:.8f} USDT")
+                return price_float
                 
             except Exception as e:
                 logger.error(f"Jupiter: error for mint={mint}: {e}")
@@ -550,12 +649,10 @@ class PriceFetcher:
         results = {}
         
         def fetch_mexc():
-            """Fetch MEXC price in separate thread with own DB session."""
-            thread_db = models.SessionLocal()
-            try:
-                return self.get_mexc_price(thread_db, base, quote, token.mexc_price_scale)
-            finally:
-                thread_db.close()
+            """Get MEXC price from cache (batch fetched in worker)."""
+            # OPTIMIZED: MEXC prices are pre-fetched in batch by worker
+            # Just get from cache - no network request needed
+            return self.get_mexc_price_from_cache(base, quote, token.mexc_price_scale)
         
         def fetch_jupiter():
             """Fetch Jupiter price in separate thread with own DB session."""

@@ -89,7 +89,8 @@ class PriceWorker:
                 time.sleep(1)  # Only sleep on error
     
     def _fetch_all_prices_streaming(self):
-        """Fetch prices for all tokens with IMMEDIATE updates as each completes."""
+        """Fetch prices for all tokens with IMMEDIATE updates as each completes.
+        OPTIMIZED: Fetches all MEXC prices in ONE batch request first."""
         if models.SessionLocal is None:
             logger.warning("Database not available, skipping price fetch")
             time.sleep(1)
@@ -102,6 +103,9 @@ class PriceWorker:
             if not tokens:
                 time.sleep(1)
                 return
+            
+            # OPTIMIZATION: Fetch ALL MEXC prices in ONE request first
+            price_fetcher.get_all_mexc_prices(db)
             
             # Create list of token IDs to fetch
             token_ids = [(t.id, t.name) for t in tokens]
@@ -162,42 +166,75 @@ class PriceWorker:
         finally:
             db.close()
     
+    # History batch buffer
+    _history_buffer: Dict[str, Dict] = {}
+    _history_buffer_lock = threading.Lock()
+    _last_history_save: float = 0
+    _history_save_interval: float = 5.0  # Save history every 5 seconds
+    
     def _save_history_single(self, token_name: str, data: Dict):
-        """Save spread data for single token to history (async)."""
-        def save():
+        """Buffer spread data for batch saving (every 5 seconds instead of every update)."""
+        # Add to buffer (overwrite previous data for same token)
+        with self._history_buffer_lock:
+            self._history_buffer[token_name] = data
+        
+        # Check if it's time to flush buffer
+        current_time = time.time()
+        if current_time - self._last_history_save >= self._history_save_interval:
+            self._flush_history_buffer()
+    
+    def _flush_history_buffer(self):
+        """Flush history buffer to database in batch."""
+        with self._history_buffer_lock:
+            if not self._history_buffer:
+                return
+            buffer_copy = self._history_buffer.copy()
+            self._history_buffer.clear()
+            self._last_history_save = time.time()
+        
+        def save_batch():
             if models.SessionLocal is None:
                 return
             db = models.SessionLocal()
             try:
-                token = db.query(Token).filter(Token.name == token_name).first()
-                if not token:
-                    return
+                # Get all tokens in one query
+                token_names = list(buffer_copy.keys())
+                tokens = db.query(Token).filter(Token.name.in_(token_names)).all()
+                token_map = {t.name: t.id for t in tokens}
                 
-                timestamp = data.get("timestamp", time.time())
-                spreads = data.get("spreads", {})
+                entries_to_add = []
+                for token_name, data in buffer_copy.items():
+                    token_id = token_map.get(token_name)
+                    if not token_id:
+                        continue
+                    
+                    timestamp = data.get("timestamp", time.time())
+                    spreads = data.get("spreads", {})
+                    
+                    for dex_name, spread_data in spreads.items():
+                        entries_to_add.append(SpreadHistory(
+                            token_id=token_id,
+                            dex_name=dex_name,
+                            timestamp=timestamp,
+                            direct_spread=spread_data.get("direct"),
+                            reverse_spread=spread_data.get("reverse"),
+                            dex_price=spread_data.get("dex_price"),
+                            cex_bid=spread_data.get("cex_bid"),
+                            cex_ask=spread_data.get("cex_ask"),
+                        ))
                 
-                for dex_name, spread_data in spreads.items():
-                    history_entry = SpreadHistory(
-                        token_id=token.id,
-                        dex_name=dex_name,
-                        timestamp=timestamp,
-                        direct_spread=spread_data.get("direct"),
-                        reverse_spread=spread_data.get("reverse"),
-                        dex_price=spread_data.get("dex_price"),
-                        cex_bid=spread_data.get("cex_bid"),
-                        cex_ask=spread_data.get("cex_ask"),
-                    )
-                    db.add(history_entry)
-                
-                db.commit()
+                if entries_to_add:
+                    db.bulk_save_objects(entries_to_add)
+                    db.commit()
+                    logger.debug(f"Saved {len(entries_to_add)} history entries in batch")
             except Exception as e:
-                logger.error(f"Error saving history for {token_name}: {e}")
+                logger.error(f"Error saving history batch: {e}")
                 db.rollback()
             finally:
                 db.close()
         
         # Run in background thread to not block
-        threading.Thread(target=save, daemon=True).start()
+        threading.Thread(target=save_batch, daemon=True).start()
     
     def _cleanup_old_history_async(self):
         """Remove history older than 2 days (async)."""
