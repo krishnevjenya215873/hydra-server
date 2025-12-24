@@ -372,6 +372,9 @@ user2:pass2@192.168.1.2:1080"></textarea>
         <div class="tab-content" id="tab-tokens">
             <div class="card">
                 <h2>Список токенов</h2>
+                <div style="margin-bottom: 15px;">
+                    <button class="btn btn-danger" onclick="clearAllTokens()">Удалить все</button>
+                </div>
                 <table>
                     <thead>
                         <tr>
@@ -458,6 +461,9 @@ EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
             <div class="card">
                 <h2>Список токенов по умолчанию</h2>
                 <p style="color: var(--text-secondary); margin-bottom: 15px;">Эти токены автоматически появятся у всех новых пользователей при первом запуске программы.</p>
+                <div style="margin-bottom: 15px;">
+                    <button class="btn btn-danger" onclick="clearAllDefaultTokens()">Удалить все</button>
+                </div>
                 <table>
                     <thead>
                         <tr>
@@ -799,6 +805,17 @@ EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
             }
         }
         
+        async function clearAllTokens() {
+            if (!confirm('Удалить ВСЕ токены? Это действие нельзя отменить!')) return;
+            try {
+                await apiCall('/api/admin/tokens', 'DELETE');
+                loadTokens();
+                loadStats();
+            } catch (error) {
+                alert('Ошибка: ' + error.message);
+            }
+        }
+        
         async function deleteToken(name) {
             if (!confirm(`Удалить токен ${name}? Это действие нельзя отменить!`)) return;
             
@@ -991,6 +1008,16 @@ EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
                 
             } catch (error) {
                 resultsDiv.innerHTML = `<p style="color: var(--accent-red);">Ошибка: ${error.message}</p>`;
+            }
+        }
+        
+        async function clearAllDefaultTokens() {
+            if (!confirm('Удалить ВСЕ токены по умолчанию? Это действие нельзя отменить!')) return;
+            try {
+                await apiCall('/api/admin/default-tokens', 'DELETE');
+                loadDefaultTokens();
+            } catch (error) {
+                alert('Ошибка: ' + error.message);
             }
         }
         

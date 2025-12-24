@@ -488,6 +488,36 @@ async def admin_login(credentials: AdminLogin, db: Session = Depends(get_db)):
 
 # ============== Admin: Token Management ==============
 
+@app.delete("/api/admin/tokens")
+async def admin_delete_all_tokens(
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Delete ALL tokens (admin only)."""
+    
+    # Get count before deletion
+    count = db.query(Token).count()
+    
+    # Delete all spread history first
+    try:
+        db.execute(text("DELETE FROM spread_history"))
+    except Exception as e:
+        logger.warning(f"Error deleting spread history: {e}")
+    
+    # Delete all default_tokens links
+    try:
+        db.execute(text("DELETE FROM default_tokens"))
+    except Exception as e:
+        logger.warning(f"Error deleting default_tokens: {e}")
+    
+    # Delete all tokens
+    db.query(Token).delete()
+    db.commit()
+    
+    logger.info(f"All tokens deleted by admin: {count} tokens")
+    return {"status": "deleted", "count": count}
+
+
 @app.delete("/api/admin/tokens/{token_name}")
 async def admin_delete_token(
     token_name: str,
@@ -1063,6 +1093,22 @@ async def admin_bulk_add_default_tokens(
             results["failed"].append({"address": address, "error": str(e)})
     
     return results
+
+
+@app.delete("/api/admin/default-tokens")
+async def admin_delete_all_default_tokens(
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Удалить ВСЕ токены из списка по умолчанию (только админ).
+    
+    Удаляет только ссылки из DefaultTokens, сами Token остаются.
+    """
+    count = db.query(DefaultToken).count()
+    db.query(DefaultToken).delete()
+    db.commit()
+    logger.info(f"All default tokens deleted by admin: {count} tokens")
+    return {"status": "deleted", "count": count}
 
 
 @app.delete("/api/admin/default-tokens/{token_id}")
