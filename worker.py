@@ -30,8 +30,8 @@ class PriceWorker:
     def __init__(self):
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._interval = 2.0  # 2 second delay between cycles to prevent overload
-        self._max_workers = 10  # Reduced from 50 to prevent server overload
+        self._interval = 0.0  # NO DELAY between cycles for real-time updates
+        self._max_workers = 50  # Maximum parallel requests
         self._latest_data: Dict[str, Dict] = {}
         self._callbacks: Set[Callable] = set()
         self._lock = threading.Lock()
@@ -80,16 +80,13 @@ class PriceWorker:
             return self._latest_data.get(token_name)
     
     def _run_loop(self):
-        """Main worker loop with configurable delay between cycles."""
+        """Main worker loop - continuous fetching without delays."""
         while self._running:
             try:
                 self._fetch_all_prices_streaming()
-                # Sleep between cycles to prevent server overload
-                if self._interval > 0:
-                    time.sleep(self._interval)
             except Exception as e:
                 logger.error(f"Worker error: {e}")
-                time.sleep(2)  # Sleep on error
+                time.sleep(1)  # Only sleep on error
     
     def _fetch_all_prices_streaming(self):
         """Fetch prices for all tokens with IMMEDIATE updates as each completes."""
