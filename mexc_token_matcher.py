@@ -195,6 +195,174 @@ def get_all_mexc_usdt_symbols() -> List[str]:
     ]
 
 
+# ========== BSC/PancakeSwap поддержка ==========
+
+MEXC_TICKER_URL = "https://www.mexc.com/api/platform/futures/api/v1/contract/ticker"
+MEXC_COIN_INTRO_URL = "https://www.mexc.com/api/activity/contract/coin/introduce/v2"
+
+
+def get_mexc_contract_id(mexc_symbol: str, proxy_url: Optional[str] = None) -> Optional[int]:
+    """
+    Получает contractId для MEXC символа.
+    
+    Args:
+        mexc_symbol: MEXC символ (e.g., "COAI_USDT")
+        proxy_url: Optional proxy URL
+    
+    Returns:
+        contractId или None
+    """
+    try:
+        client_kwargs = {"timeout": 30}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        
+        with httpx.Client(**client_kwargs) as client:
+            response = client.get(
+                MEXC_TICKER_URL,
+                params={"symbol": mexc_symbol}
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("success") and data.get("data"):
+                contract_id = data["data"].get("contractId")
+                if contract_id:
+                    logger.info(f"Got contractId for {mexc_symbol}: {contract_id}")
+                    return contract_id
+            
+            logger.warning(f"No contractId found for {mexc_symbol}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting contractId for {mexc_symbol}: {e}")
+        return None
+
+
+def get_bsc_address_from_contract_id(contract_id: int, proxy_url: Optional[str] = None) -> Optional[str]:
+    """
+    Получает BSC адрес токена через MEXC coin introduce API.
+    
+    Args:
+        contract_id: MEXC contractId
+        proxy_url: Optional proxy URL
+    
+    Returns:
+        BSC адрес (0x...) или None
+    """
+    try:
+        client_kwargs = {"timeout": 30}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        
+        with httpx.Client(**client_kwargs) as client:
+            response = client.get(
+                MEXC_COIN_INTRO_URL,
+                params={
+                    "language": "ru-RU",
+                    "contractId": contract_id
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("success") and data.get("data"):
+                # Проверяем explorerUrls (массив)
+                explorer_urls = data["data"].get("explorerUrls", [])
+                if not explorer_urls:
+                    # Пробуем explorerUrl (строка)
+                    explorer_url = data["data"].get("explorerUrl", "")
+                    if explorer_url:
+                        explorer_urls = [explorer_url]
+                
+                # Ищем BSC адрес в bscscan.com URLs
+                for url in explorer_urls:
+                    if "bscscan.com/token/" in url:
+                        match = re.search(r'bscscan\.com/token/(0x[a-fA-F0-9]+)', url)
+                        if match:
+                            bsc_address = match.group(1).lower()
+                            logger.info(f"Found BSC address from contractId {contract_id}: {bsc_address}")
+                            return bsc_address
+                
+                logger.warning(f"No BSC address found in explorerUrls for contractId {contract_id}")
+                return None
+            
+            logger.warning(f"No data for contractId {contract_id}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting BSC address for contractId {contract_id}: {e}")
+        return None
+
+
+def extract_bsc_contract(mexc_symbol: str, proxy_url: Optional[str] = None) -> Optional[str]:
+    """
+    Извлекает BSC contract адрес для MEXC символа.
+    
+    Логика:
+    1. Получаем contractId через ticker API
+    2. Получаем BSC адрес через coin introduce API
+    
+    Args:
+        mexc_symbol: MEXC символ (e.g., "COAI_USDT")
+        proxy_url: Optional proxy URL
+    
+    Returns:
+        BSC адрес (0x...) или None
+    """
+    # Шаг 1: Получаем contractId
+    contract_id = get_mexc_contract_id(mexc_symbol, proxy_url)
+    if not contract_id:
+        return None
+    
+    # Шаг 2: Получаем BSC адрес
+    return get_bsc_address_from_contract_id(contract_id, proxy_url)
+
+
+def find_matching_bsc_address(
+    base_token: str, 
+    bsc_address: str,
+    proxy_url: Optional[str] = None
+) -> Optional[str]:
+    """
+    Находит MEXC символ, который соответствует данному BSC адресу.
+    
+    Args:
+        base_token: Символ токена (e.g., "COAI")
+        bsc_address: BSC адрес для сравнения (0x...)
+        proxy_url: Optional proxy URL
+    
+    Returns:
+        MEXC base symbol если найден, None иначе
+    """
+    # Нормализуем BSC адрес для сравнения
+    bsc_address_lower = bsc_address.lower()
+    
+    # Получаем все возможные MEXC символы
+    potential_symbols = find_potential_mexc_symbols(base_token)
+    
+    if not potential_symbols:
+        logger.warning(f"No MEXC symbols found for {base_token}")
+        return None
+    
+    logger.info(f"Checking {len(potential_symbols)} potential symbols for BSC match: {potential_symbols}")
+    
+    # Проверяем каждый символ
+    for mexc_symbol in potential_symbols:
+        found_bsc = extract_bsc_contract(mexc_symbol, proxy_url)
+        
+        if found_bsc and found_bsc.lower() == bsc_address_lower:
+            # Нашли совпадение!
+            base_coin = mexc_symbol.replace("_USDT", "")
+            logger.info(f"✓ BSC match found: {base_token} -> {base_coin} (BSC verified)")
+            return base_coin
+        elif found_bsc:
+            logger.info(f"✗ BSC mismatch for {mexc_symbol}: {found_bsc} != {bsc_address_lower}")
+    
+    logger.warning(f"No matching MEXC symbol found for {base_token} with BSC {bsc_address}")
+    return None
+
+
 # Test
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

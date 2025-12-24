@@ -32,7 +32,7 @@ from websocket_manager import connection_manager, handle_websocket_message
 from worker import price_worker
 from admin_routes import router as admin_router
 from proxy_manager import proxy_health_checker, proxy_manager
-from mexc_token_matcher import find_matching_mexc_symbol, find_potential_mexc_symbols
+from mexc_token_matcher import find_matching_mexc_symbol, find_potential_mexc_symbols, find_matching_bsc_address
 
 # Configure logging
 logging.basicConfig(
@@ -891,22 +891,39 @@ async def admin_create_default_token(
     token = db.query(Token).filter(Token.name == normalized_name).first()
     
     if not token:
-        # Auto-detect mexc_symbol if jupiter_mint is provided and mexc_symbol is not set
+        # Auto-detect mexc_symbol if not set
         mexc_symbol = data.mexc_symbol
+        proxy_url = proxy_manager.get_proxy_url_cached()
+        
+        # Пробуем найти MEXC символ по Jupiter mint (для Solana токенов)
         if not mexc_symbol and data.jupiter_mint:
-            proxy_url = proxy_manager.get_proxy_url_cached()
-            logger.info(f"Auto-detecting MEXC symbol for {normalized_base} with mint {data.jupiter_mint}")
+            logger.info(f"Auto-detecting MEXC symbol for {normalized_base} with Jupiter mint {data.jupiter_mint}")
             mexc_symbol = find_matching_mexc_symbol(
                 base_token=normalized_base,
                 jupiter_mint=data.jupiter_mint,
                 proxy_url=proxy_url
             )
             if mexc_symbol:
-                logger.info(f"Found MEXC symbol for {normalized_base}: {mexc_symbol}")
+                logger.info(f"Found MEXC symbol for {normalized_base} via Jupiter: {mexc_symbol}")
             else:
                 potential = find_potential_mexc_symbols(normalized_base)
                 if potential:
-                    logger.warning(f"MEXC symbols found for {normalized_base} but contract mismatch: {potential}")
+                    logger.warning(f"MEXC symbols found for {normalized_base} but Jupiter contract mismatch: {potential}")
+        
+        # Пробуем найти MEXC символ по BSC адресу (для PancakeSwap токенов)
+        if not mexc_symbol and data.bsc_address:
+            logger.info(f"Auto-detecting MEXC symbol for {normalized_base} with BSC address {data.bsc_address}")
+            mexc_symbol = find_matching_bsc_address(
+                base_token=normalized_base,
+                bsc_address=data.bsc_address,
+                proxy_url=proxy_url
+            )
+            if mexc_symbol:
+                logger.info(f"Found MEXC symbol for {normalized_base} via BSC: {mexc_symbol}")
+            else:
+                potential = find_potential_mexc_symbols(normalized_base)
+                if potential:
+                    logger.warning(f"MEXC symbols found for {normalized_base} but BSC contract mismatch: {potential}")
         
         # Создаём токен в основной таблице
         token = Token(
@@ -1042,17 +1059,29 @@ async def admin_bulk_add_default_tokens(
                 # Проверяем/создаём Token (имя уже нормализовано)
                 token = db.query(Token).filter(Token.name == token_name).first()
                 if not token:
-                    # Auto-detect mexc_symbol for Jupiter tokens
+                    # Auto-detect mexc_symbol
                     mexc_symbol = None
+                    proxy_url = proxy_manager.get_proxy_url_cached()
+                    
+                    # Пробуем найти по Jupiter mint
                     if jupiter_mint:
-                        proxy_url = proxy_manager.get_proxy_url_cached()
                         mexc_symbol = find_matching_mexc_symbol(
                             base_token=token_symbol,
                             jupiter_mint=jupiter_mint,
                             proxy_url=proxy_url
                         )
                         if mexc_symbol:
-                            logger.info(f"Found MEXC symbol for {token_symbol}: {mexc_symbol}")
+                            logger.info(f"Found MEXC symbol for {token_symbol} via Jupiter: {mexc_symbol}")
+                    
+                    # Пробуем найти по BSC адресу
+                    if not mexc_symbol and bsc_address:
+                        mexc_symbol = find_matching_bsc_address(
+                            base_token=token_symbol,
+                            bsc_address=bsc_address,
+                            proxy_url=proxy_url
+                        )
+                        if mexc_symbol:
+                            logger.info(f"Found MEXC symbol for {token_symbol} via BSC: {mexc_symbol}")
                     
                     token = Token(
                         name=token_name,
