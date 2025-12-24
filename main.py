@@ -43,6 +43,36 @@ logger = logging.getLogger(__name__)
 # Server start time for uptime calculation
 SERVER_START_TIME = time.time()
 
+# Solana RPC for getting token decimals
+SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+
+def get_solana_token_decimals(mint_address: str) -> int:
+    """Get token decimals from Solana RPC. Returns 6 as default if fails."""
+    import httpx
+    try:
+        response = httpx.post(
+            SOLANA_RPC_URL,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenSupply",
+                "params": [mint_address]
+            },
+            timeout=5.0
+        )
+        if response.status_code == 200:
+            data = response.json()
+            decimals = data.get("result", {}).get("value", {}).get("decimals")
+            if decimals is not None:
+                logger.info(f"Solana RPC: decimals for {mint_address} = {decimals}")
+                return int(decimals)
+    except Exception as e:
+        logger.warning(f"Solana RPC error for {mint_address}: {e}")
+    
+    # Default to 6 (most common for Solana tokens)
+    logger.warning(f"Using default decimals=6 for {mint_address}")
+    return 6
+
 # Simple token-based auth for admin
 ADMIN_TOKENS: Dict[str, datetime] = {}
 TOKEN_EXPIRY_HOURS = 24
@@ -876,7 +906,7 @@ async def admin_bulk_add_default_tokens(
                 # Solana / Jupiter
                 if chain_id == "solana" or dex == "jupiter":
                     jupiter_mint = address
-                    jupiter_decimals = 9
+                    jupiter_decimals = get_solana_token_decimals(address)
                     dexes.append("jupiter")
                 
                 # BSC / PancakeSwap
@@ -894,7 +924,7 @@ async def admin_bulk_add_default_tokens(
                 if not dexes:
                     if dex == "jupiter":
                         jupiter_mint = address
-                        jupiter_decimals = 9
+                        jupiter_decimals = get_solana_token_decimals(address)
                         dexes = ["jupiter"]
                     elif dex == "pancake":
                         bsc_address = address
