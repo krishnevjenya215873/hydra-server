@@ -31,7 +31,7 @@ class PriceWorker:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._interval = 0.0  # NO DELAY between cycles for real-time updates
-        self._max_workers = 50  # Maximum parallel requests
+        self._max_workers = 15  # Balanced: enough for parallel but not overloading
         self._latest_data: Dict[str, Dict] = {}
         self._callbacks: Set[Callable] = set()
         self._lock = threading.Lock()
