@@ -48,6 +48,31 @@ ADMIN_TOKENS: Dict[str, datetime] = {}
 TOKEN_EXPIRY_HOURS = 24
 
 
+def normalize_token_name(name: str) -> str:
+    """Normalize token name to prevent duplicates.
+    
+    - Removes extra spaces
+    - Converts to uppercase
+    - Ensures format is BASE-QUOTE (e.g., FARTCOIN-USDT)
+    """
+    # Remove extra spaces and strip
+    name = ' '.join(name.split()).strip()
+    # Convert to uppercase
+    name = name.upper()
+    # Replace space-dash or dash-space with just dash
+    name = name.replace(' -', '-').replace('- ', '-')
+    return name
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Normalize token symbol (base currency).
+    
+    - Removes spaces
+    - Converts to uppercase
+    """
+    return symbol.replace(' ', '').strip().upper()
+
+
 def hash_password(password: str) -> str:
     """Hash password with SHA256."""
     return hashlib.sha256(password.encode()).hexdigest()
@@ -246,21 +271,29 @@ async def get_token(token_name: str, db: Session = Depends(get_db)):
 @app.post("/api/tokens", response_model=TokenResponse)
 async def create_token(token_data: TokenCreate, db: Session = Depends(get_db)):
     """Create new token (from client app)."""
-    # Check if token already exists
-    existing = db.query(Token).filter(Token.name == token_data.name).first()
+    # Normalize token name and base symbol
+    normalized_name = normalize_token_name(token_data.name)
+    normalized_base = normalize_symbol(token_data.base)
+    
+    # Check if token already exists (by normalized name)
+    existing = db.query(Token).filter(Token.name == normalized_name).first()
     if existing:
         # If exists but inactive, reactivate it
         if not existing.is_active:
             existing.is_active = True
             for key, value in token_data.dict(exclude_unset=True).items():
-                if hasattr(existing, key):
+                if hasattr(existing, key) and key not in ['name', 'base']:
                     setattr(existing, key, value)
             db.commit()
             db.refresh(existing)
             return existing
         raise HTTPException(status_code=400, detail="Token already exists")
     
-    token = Token(**token_data.dict())
+    # Create token with normalized name
+    token_dict = token_data.dict()
+    token_dict['name'] = normalized_name
+    token_dict['base'] = normalized_base
+    token = Token(**token_dict)
     db.add(token)
     db.commit()
     db.refresh(token)
@@ -727,20 +760,25 @@ async def admin_create_default_token(
     """Добавить токен по умолчанию (только админ).
     
     Логика:
-    1. Проверяем есть ли токен в Tokens
-    2. Если нет - создаём его
-    3. Проверяем нет ли уже в DefaultTokens
-    4. Создаём ссылку в DefaultTokens
+    1. Нормализуем имя токена
+    2. Проверяем есть ли токен в Tokens
+    3. Если нет - создаём его
+    4. Проверяем нет ли уже в DefaultTokens
+    5. Создаём ссылку в DefaultTokens
     """
+    # Нормализуем имя и символ
+    normalized_name = normalize_token_name(data.name)
+    normalized_base = normalize_symbol(data.base)
+    
     # Проверяем есть ли токен в основной таблице Tokens
-    token = db.query(Token).filter(Token.name == data.name).first()
+    token = db.query(Token).filter(Token.name == normalized_name).first()
     
     if not token:
         # Создаём токен в основной таблице
         token = Token(
-            name=data.name,
-            base=data.base,
-            quote=data.quote,
+            name=normalized_name,
+            base=normalized_base,
+            quote=data.quote.upper(),
             dexes=data.dexes,
             jupiter_mint=data.jupiter_mint,
             jupiter_decimals=data.jupiter_decimals,
@@ -759,7 +797,7 @@ async def admin_create_default_token(
         db.add(token)
         db.commit()
         db.refresh(token)
-        logger.info(f"Created new token: {data.name}")
+        logger.info(f"Created new token: {normalized_name}")
     
     # Проверяем нет ли уже в DefaultTokens
     existing_default = db.query(DefaultToken).filter(DefaultToken.token_id == token.id).first()
@@ -772,7 +810,7 @@ async def admin_create_default_token(
     db.commit()
     db.refresh(default_token)
     
-    logger.info(f"Added token to defaults: {data.name}")
+    logger.info(f"Added token to defaults: {normalized_name}")
     return _build_default_token_response(default_token, token)
 
 
@@ -822,8 +860,8 @@ async def admin_bulk_add_default_tokens(
                 best_pair = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0))
                 
                 base_token = best_pair.get("baseToken") or {}
-                token_symbol = base_token.get("symbol", "UNKNOWN")
-                token_name = f"{token_symbol}-USDT"
+                token_symbol = normalize_symbol(base_token.get("symbol", "UNKNOWN"))
+                token_name = f"{token_symbol}-USDT"  # Already normalized
                 
                 # Определяем параметры в зависимости от сети
                 chain_id = best_pair.get("chainId", "")
@@ -866,7 +904,7 @@ async def admin_bulk_add_default_tokens(
                         matcha_decimals = 18
                         dexes = ["matcha"]
                 
-                # Проверяем/создаём Token
+                # Проверяем/создаём Token (имя уже нормализовано)
                 token = db.query(Token).filter(Token.name == token_name).first()
                 if not token:
                     token = Token(
