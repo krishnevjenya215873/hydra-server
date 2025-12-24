@@ -116,34 +116,15 @@ class ProductKey(Base):
 
 
 class DefaultToken(Base):
-    """Default tokens for new users."""
+    """Default tokens for new users - references Token table."""
     __tablename__ = "default_tokens"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(100), unique=True, nullable=False, index=True)  # e.g., "SOL-USDT"
-    base = Column(String(50), nullable=False)  # e.g., "SOL"
-    quote = Column(String(50), default="USDT")  # e.g., "USDT"
-    
-    # DEX configuration
-    dexes = Column(JSON, nullable=True)  # ["pancake", "jupiter", "matcha"]
-    jupiter_mint = Column(String(100), nullable=True)
-    jupiter_decimals = Column(Integer, nullable=True)
-    bsc_address = Column(String(100), nullable=True)
-    mexc_price_scale = Column(Integer, nullable=True)
-    matcha_address = Column(String(100), nullable=True)
-    matcha_decimals = Column(Integer, nullable=True)
-    cg_id = Column(String(100), nullable=True)  # CoinGecko ID
-    
-    # Spread settings
-    spread_direct = Column(Boolean, default=True)
-    spread_reverse = Column(Boolean, default=True)
-    spread_threshold = Column(Float, nullable=True)
-    spread_direct_threshold = Column(Float, nullable=True)
-    spread_reverse_threshold = Column(Float, nullable=True)
-    
-    # Status
-    is_active = Column(Boolean, default=True)
+    token_id = Column(Integer, ForeignKey("tokens.id", ondelete="CASCADE"), nullable=False, unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationship to Token
+    token = relationship("Token", backref="default_token_ref")
 
 
 class ServerSettings(Base):
@@ -209,6 +190,70 @@ def create_db_engine():
         return False
 
 
+def migrate_default_tokens(db):
+    """Migrate default_tokens table to new structure with token_id reference."""
+    from sqlalchemy import inspect
+    
+    inspector = inspect(db.bind)
+    
+    # Check if default_tokens table exists and has old structure
+    if 'default_tokens' in inspector.get_table_names():
+        columns = [col['name'] for col in inspector.get_columns('default_tokens')]
+        
+        # If table has old structure (has 'name' column but not 'token_id')
+        if 'name' in columns and 'token_id' not in columns:
+            print("Migrating default_tokens table to new structure...")
+            
+            try:
+                # Get all old default tokens
+                old_tokens = db.execute(text("SELECT * FROM default_tokens")).fetchall()
+                print(f"Found {len(old_tokens)} old default tokens to migrate")
+                
+                # Drop old table
+                db.execute(text("DROP TABLE default_tokens CASCADE"))
+                db.commit()
+                print("Old default_tokens table dropped")
+                
+                # Create new table (will be created by Base.metadata.create_all)
+                Base.metadata.create_all(bind=db.bind)
+                print("New default_tokens table created")
+                
+                # Migrate data: for each old default token, find or create Token and create DefaultToken
+                for old_token in old_tokens:
+                    # old_token is a Row object, access by index or column name
+                    token_name = old_token[1] if len(old_token) > 1 else None  # name is usually second column
+                    if not token_name:
+                        continue
+                    
+                    # Find existing Token by name
+                    existing_token = db.query(Token).filter(Token.name == token_name).first()
+                    
+                    if existing_token:
+                        # Check if DefaultToken already exists for this token
+                        existing_default = db.query(DefaultToken).filter(DefaultToken.token_id == existing_token.id).first()
+                        if not existing_default:
+                            new_default = DefaultToken(token_id=existing_token.id)
+                            db.add(new_default)
+                            print(f"Migrated default token: {token_name} -> token_id={existing_token.id}")
+                    else:
+                        print(f"Token {token_name} not found in tokens table, skipping")
+                
+                db.commit()
+                print("Migration completed successfully!")
+                
+            except Exception as e:
+                print(f"Migration error: {e}")
+                db.rollback()
+                # If migration fails, just recreate the table
+                try:
+                    db.execute(text("DROP TABLE IF EXISTS default_tokens CASCADE"))
+                    db.commit()
+                    Base.metadata.create_all(bind=db.bind)
+                    print("Recreated default_tokens table after migration error")
+                except Exception as e2:
+                    print(f"Failed to recreate table: {e2}")
+
+
 def init_db():
     """Initialize database tables with retry."""
     import time
@@ -224,6 +269,11 @@ def init_db():
         sys.stdout.flush()
         if create_db_engine():
             try:
+                # Run migration before creating tables
+                db = SessionLocal()
+                migrate_default_tokens(db)
+                db.close()
+                
                 Base.metadata.create_all(bind=engine)
                 print(f"Database initialized successfully! SessionLocal={SessionLocal}")
                 

@@ -181,11 +181,21 @@ class ServerStats(BaseModel):
 
 # ============== Default Token Schemas ==============
 
-class DefaultTokenBase(BaseModel):
-    name: str = Field(..., description="Token pair name, e.g., SOL-USDT")
-    base: str = Field(..., description="Base currency symbol")
-    quote: str = Field(default="USDT", description="Quote currency symbol")
-    dexes: Optional[List[str]] = Field(default=None, description="List of DEXes to use")
+class DefaultTokenCreate(TokenBase):
+    """Create default token - same fields as Token."""
+    pass
+
+
+class DefaultTokenResponse(BaseModel):
+    """Response for default token - includes token data."""
+    id: int
+    token_id: int
+    created_at: datetime
+    # Token fields (from relationship)
+    name: str
+    base: str
+    quote: str
+    dexes: Optional[List[str]] = None
     jupiter_mint: Optional[str] = None
     jupiter_decimals: Optional[int] = None
     bsc_address: Optional[str] = None
@@ -198,16 +208,7 @@ class DefaultTokenBase(BaseModel):
     spread_threshold: Optional[float] = None
     spread_direct_threshold: Optional[float] = None
     spread_reverse_threshold: Optional[float] = None
-
-
-class DefaultTokenCreate(DefaultTokenBase):
-    pass
-
-
-class DefaultTokenResponse(DefaultTokenBase):
-    id: int
-    is_active: bool
-    created_at: datetime
+    is_active: bool = True
     
     class Config:
         from_attributes = True

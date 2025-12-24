@@ -671,51 +671,109 @@ async def admin_toggle_key(
 
 
 # ============== Admin: Default Tokens Management ==============
+# Default Tokens теперь ссылаются на Tokens таблицу:
+# - При добавлении в Default Tokens: сначала создаётся Token (если не существует), потом DefaultToken ссылается на него
+# - При удалении Token: автоматически удаляется DefaultToken (CASCADE)
+# - При удалении DefaultToken: Token не трогается
 
-@app.get("/api/admin/default-tokens", response_model=List[DefaultTokenResponse])
+
+def _build_default_token_response(default_token, token):
+    """Helper to build response from DefaultToken and Token."""
+    return {
+        "id": default_token.id,
+        "token_id": default_token.token_id,
+        "created_at": default_token.created_at,
+        "name": token.name,
+        "base": token.base,
+        "quote": token.quote,
+        "dexes": token.dexes,
+        "jupiter_mint": token.jupiter_mint,
+        "jupiter_decimals": token.jupiter_decimals,
+        "bsc_address": token.bsc_address,
+        "mexc_price_scale": token.mexc_price_scale,
+        "matcha_address": token.matcha_address,
+        "matcha_decimals": token.matcha_decimals,
+        "cg_id": token.cg_id,
+        "spread_direct": token.spread_direct,
+        "spread_reverse": token.spread_reverse,
+        "spread_threshold": token.spread_threshold,
+        "spread_direct_threshold": token.spread_direct_threshold,
+        "spread_reverse_threshold": token.spread_reverse_threshold,
+        "is_active": token.is_active
+    }
+
+
+@app.get("/api/admin/default-tokens")
 async def admin_list_default_tokens(
     admin_token: str = Depends(get_admin_token),
     db: Session = Depends(get_db)
 ):
     """Список всех токенов по умолчанию (только админ)."""
-    return db.query(DefaultToken).order_by(DefaultToken.created_at.desc()).all()
+    default_tokens = db.query(DefaultToken).order_by(DefaultToken.created_at.desc()).all()
+    result = []
+    for dt in default_tokens:
+        token = db.query(Token).filter(Token.id == dt.token_id).first()
+        if token:
+            result.append(_build_default_token_response(dt, token))
+    return result
 
 
-@app.post("/api/admin/default-tokens", response_model=DefaultTokenResponse)
+@app.post("/api/admin/default-tokens")
 async def admin_create_default_token(
     data: DefaultTokenCreate,
     admin_token: str = Depends(get_admin_token),
     db: Session = Depends(get_db)
 ):
-    """Добавить токен по умолчанию (только админ)."""
-    # Проверяем, нет ли уже такого токена
-    existing = db.query(DefaultToken).filter(DefaultToken.name == data.name).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Токен с таким именем уже существует")
+    """Добавить токен по умолчанию (только админ).
     
-    default_token = DefaultToken(
-        name=data.name,
-        base=data.base,
-        quote=data.quote,
-        dexes=data.dexes,
-        jupiter_mint=data.jupiter_mint,
-        jupiter_decimals=data.jupiter_decimals,
-        bsc_address=data.bsc_address,
-        mexc_price_scale=data.mexc_price_scale,
-        matcha_address=data.matcha_address,
-        matcha_decimals=data.matcha_decimals,
-        cg_id=data.cg_id,
-        spread_direct=data.spread_direct,
-        spread_reverse=data.spread_reverse,
-        spread_threshold=data.spread_threshold,
-        spread_direct_threshold=data.spread_direct_threshold,
-        spread_reverse_threshold=data.spread_reverse_threshold,
-        is_active=True
-    )
+    Логика:
+    1. Проверяем есть ли токен в Tokens
+    2. Если нет - создаём его
+    3. Проверяем нет ли уже в DefaultTokens
+    4. Создаём ссылку в DefaultTokens
+    """
+    # Проверяем есть ли токен в основной таблице Tokens
+    token = db.query(Token).filter(Token.name == data.name).first()
+    
+    if not token:
+        # Создаём токен в основной таблице
+        token = Token(
+            name=data.name,
+            base=data.base,
+            quote=data.quote,
+            dexes=data.dexes,
+            jupiter_mint=data.jupiter_mint,
+            jupiter_decimals=data.jupiter_decimals,
+            bsc_address=data.bsc_address,
+            mexc_price_scale=data.mexc_price_scale,
+            matcha_address=data.matcha_address,
+            matcha_decimals=data.matcha_decimals,
+            cg_id=data.cg_id,
+            spread_direct=data.spread_direct,
+            spread_reverse=data.spread_reverse,
+            spread_threshold=data.spread_threshold,
+            spread_direct_threshold=data.spread_direct_threshold,
+            spread_reverse_threshold=data.spread_reverse_threshold,
+            is_active=True
+        )
+        db.add(token)
+        db.commit()
+        db.refresh(token)
+        logger.info(f"Created new token: {data.name}")
+    
+    # Проверяем нет ли уже в DefaultTokens
+    existing_default = db.query(DefaultToken).filter(DefaultToken.token_id == token.id).first()
+    if existing_default:
+        raise HTTPException(status_code=400, detail="Токен уже добавлен в токены по умолчанию")
+    
+    # Создаём ссылку в DefaultTokens
+    default_token = DefaultToken(token_id=token.id)
     db.add(default_token)
     db.commit()
     db.refresh(default_token)
-    return default_token
+    
+    logger.info(f"Added token to defaults: {data.name}")
+    return _build_default_token_response(default_token, token)
 
 
 @app.post("/api/admin/default-tokens/bulk")
@@ -767,15 +825,8 @@ async def admin_bulk_add_default_tokens(
                 token_symbol = base_token.get("symbol", "UNKNOWN")
                 token_name = f"{token_symbol}-USDT"
                 
-                # Проверяем, нет ли уже такого токена
-                existing = db.query(DefaultToken).filter(DefaultToken.name == token_name).first()
-                if existing:
-                    results["failed"].append({"address": address, "error": f"Токен {token_name} уже существует"})
-                    continue
-                
                 # Определяем параметры в зависимости от сети
                 chain_id = best_pair.get("chainId", "")
-                dex_id = best_pair.get("dexId", "")
                 
                 jupiter_mint = None
                 jupiter_decimals = None
@@ -787,17 +838,7 @@ async def admin_bulk_add_default_tokens(
                 # Solana / Jupiter
                 if chain_id == "solana" or dex == "jupiter":
                     jupiter_mint = address
-                    # Пытаемся получить decimals
-                    try:
-                        decimals_resp = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}")
-                        if decimals_resp.status_code == 200:
-                            dec_data = decimals_resp.json()
-                            if dec_data.get("pairs"):
-                                base_t = dec_data["pairs"][0].get("baseToken", {})
-                                # DexScreener не всегда даёт decimals, ставим 9 по умолчанию для Solana
-                                jupiter_decimals = 9
-                    except:
-                        jupiter_decimals = 9
+                    jupiter_decimals = 9
                     dexes.append("jupiter")
                 
                 # BSC / PancakeSwap
@@ -808,10 +849,10 @@ async def admin_bulk_add_default_tokens(
                 # Base / Matcha
                 if chain_id == "base" or dex == "matcha":
                     matcha_address = address
-                    matcha_decimals = 18  # По умолчанию для ERC-20
+                    matcha_decimals = 18
                     dexes.append("matcha")
                 
-                # Если DEX не определился автоматически, используем выбранный
+                # Если DEX не определился автоматически
                 if not dexes:
                     if dex == "jupiter":
                         jupiter_mint = address
@@ -825,22 +866,35 @@ async def admin_bulk_add_default_tokens(
                         matcha_decimals = 18
                         dexes = ["matcha"]
                 
-                # Создаём токен
-                default_token = DefaultToken(
-                    name=token_name,
-                    base=token_symbol,
-                    quote="USDT",
-                    dexes=dexes,
-                    jupiter_mint=jupiter_mint,
-                    jupiter_decimals=jupiter_decimals,
-                    bsc_address=bsc_address,
-                    matcha_address=matcha_address,
-                    matcha_decimals=matcha_decimals,
-                    is_active=True
-                )
+                # Проверяем/создаём Token
+                token = db.query(Token).filter(Token.name == token_name).first()
+                if not token:
+                    token = Token(
+                        name=token_name,
+                        base=token_symbol,
+                        quote="USDT",
+                        dexes=dexes,
+                        jupiter_mint=jupiter_mint,
+                        jupiter_decimals=jupiter_decimals,
+                        bsc_address=bsc_address,
+                        matcha_address=matcha_address,
+                        matcha_decimals=matcha_decimals,
+                        is_active=True
+                    )
+                    db.add(token)
+                    db.commit()
+                    db.refresh(token)
+                
+                # Проверяем нет ли уже в DefaultTokens
+                existing_default = db.query(DefaultToken).filter(DefaultToken.token_id == token.id).first()
+                if existing_default:
+                    results["failed"].append({"address": address, "error": f"Токен {token_name} уже в списке по умолчанию"})
+                    continue
+                
+                # Создаём ссылку в DefaultTokens
+                default_token = DefaultToken(token_id=token.id)
                 db.add(default_token)
                 db.commit()
-                db.refresh(default_token)
                 
                 results["success"].append({
                     "address": address,
@@ -861,12 +915,15 @@ async def admin_delete_default_token(
     admin_token: str = Depends(get_admin_token),
     db: Session = Depends(get_db)
 ):
-    """Удалить токен по умолчанию (только админ)."""
-    token = db.query(DefaultToken).filter(DefaultToken.id == token_id).first()
-    if not token:
-        raise HTTPException(status_code=404, detail="Токен не найден")
+    """Удалить токен из списка по умолчанию (только админ).
     
-    db.delete(token)
+    Удаляет только ссылку из DefaultTokens, сам Token остаётся.
+    """
+    default_token = db.query(DefaultToken).filter(DefaultToken.id == token_id).first()
+    if not default_token:
+        raise HTTPException(status_code=404, detail="Токен не найден в списке по умолчанию")
+    
+    db.delete(default_token)
     db.commit()
     return {"status": "deleted", "token_id": token_id}
 
@@ -876,30 +933,30 @@ async def admin_delete_default_token(
 @app.get("/api/default-tokens")
 async def get_default_tokens(db: Session = Depends(get_db)):
     """Получить список токенов по умолчанию (публичный эндпоинт для клиента)."""
-    tokens = db.query(DefaultToken).filter(DefaultToken.is_active == True).all()
-    return {
-        "tokens": [
-            {
-                "name": t.name,
-                "base": t.base,
-                "quote": t.quote,
-                "dexes": t.dexes or [],
-                "jupiter_mint": t.jupiter_mint,
-                "jupiter_decimals": t.jupiter_decimals,
-                "bsc_address": t.bsc_address,
-                "mexc_price_scale": t.mexc_price_scale,
-                "matcha_address": t.matcha_address,
-                "matcha_decimals": t.matcha_decimals,
-                "cg_id": t.cg_id,
-                "spread_direct": t.spread_direct,
-                "spread_reverse": t.spread_reverse,
-                "spread_threshold": t.spread_threshold,
-                "spread_direct_threshold": t.spread_direct_threshold,
-                "spread_reverse_threshold": t.spread_reverse_threshold
-            }
-            for t in tokens
-        ]
-    }
+    default_tokens = db.query(DefaultToken).all()
+    result = []
+    for dt in default_tokens:
+        token = db.query(Token).filter(Token.id == dt.token_id, Token.is_active == True).first()
+        if token:
+            result.append({
+                "name": token.name,
+                "base": token.base,
+                "quote": token.quote,
+                "dexes": token.dexes or [],
+                "jupiter_mint": token.jupiter_mint,
+                "jupiter_decimals": token.jupiter_decimals,
+                "bsc_address": token.bsc_address,
+                "mexc_price_scale": token.mexc_price_scale,
+                "matcha_address": token.matcha_address,
+                "matcha_decimals": token.matcha_decimals,
+                "cg_id": token.cg_id,
+                "spread_direct": token.spread_direct,
+                "spread_reverse": token.spread_reverse,
+                "spread_threshold": token.spread_threshold,
+                "spread_direct_threshold": token.spread_direct_threshold,
+                "spread_reverse_threshold": token.spread_reverse_threshold
+            })
+    return {"tokens": result}
 
 
 # ============== Public: Product Key Verification ==============
