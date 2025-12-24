@@ -801,12 +801,30 @@ EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
         
         async function deleteToken(name) {
             if (!confirm(`Удалить токен ${name}? Это действие нельзя отменить!`)) return;
+            
+            // Удаляем строку из таблицы сразу для мгновенного отклика
+            const rows = document.querySelectorAll('#tokenTable tr');
+            rows.forEach(row => {
+                if (row.cells[0] && row.cells[0].textContent === name) {
+                    row.style.opacity = '0.5';
+                    row.style.pointerEvents = 'none';
+                }
+            });
+            
             try {
-                await apiCall(`/api/admin/tokens/${encodeURIComponent(name)}`, 'DELETE');
-                loadTokens();
-                loadStats();
+                const response = await apiCall(`/api/admin/tokens/${encodeURIComponent(name)}`, 'DELETE');
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Ошибка удаления');
+                }
+                // Обновляем списки после успешного удаления
+                await loadTokens();
+                await loadStats();
             } catch (error) {
+                console.error('Delete token error:', error);
                 alert('Ошибка: ' + error.message);
+                // Восстанавливаем строку при ошибке
+                await loadTokens();
             }
         }
         
@@ -978,11 +996,28 @@ EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
         
         async function deleteDefaultToken(id) {
             if (!confirm('Удалить этот токен по умолчанию?')) return;
+            
+            // Мгновенный визуальный отклик - скрываем строку
+            const rows = document.querySelectorAll('#defaultTokensTable tr');
+            rows.forEach(row => {
+                const deleteBtn = row.querySelector('button');
+                if (deleteBtn && deleteBtn.onclick && deleteBtn.onclick.toString().includes(id)) {
+                    row.style.opacity = '0.5';
+                    row.style.pointerEvents = 'none';
+                }
+            });
+            
             try {
-                await apiCall(`/api/admin/default-tokens/${id}`, 'DELETE');
-                loadDefaultTokens();
+                const response = await apiCall(`/api/admin/default-tokens/${id}`, 'DELETE');
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Ошибка удаления');
+                }
+                await loadDefaultTokens();
             } catch (error) {
+                console.error('Delete default token error:', error);
                 alert('Ошибка: ' + error.message);
+                await loadDefaultTokens();
             }
         }
     </script>
