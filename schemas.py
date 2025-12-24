@@ -177,3 +177,37 @@ class ServerStats(BaseModel):
     active_proxies: int
     connected_clients: int
     uptime_seconds: float
+
+
+# ============== Default Token Schemas ==============
+
+class DefaultTokenBase(BaseModel):
+    name: str = Field(..., description="Token pair name, e.g., SOL-USDT")
+    base: str = Field(..., description="Base currency symbol")
+    quote: str = Field(default="USDT", description="Quote currency symbol")
+    dexes: Optional[List[str]] = Field(default=None, description="List of DEXes to use")
+    jupiter_mint: Optional[str] = None
+    jupiter_decimals: Optional[int] = None
+    bsc_address: Optional[str] = None
+    mexc_price_scale: Optional[int] = None
+    matcha_address: Optional[str] = None
+    matcha_decimals: Optional[int] = None
+    cg_id: Optional[str] = None
+    spread_direct: bool = True
+    spread_reverse: bool = True
+    spread_threshold: Optional[float] = None
+    spread_direct_threshold: Optional[float] = None
+    spread_reverse_threshold: Optional[float] = None
+
+
+class DefaultTokenCreate(DefaultTokenBase):
+    pass
+
+
+class DefaultTokenResponse(DefaultTokenBase):
+    id: int
+    is_active: bool
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True

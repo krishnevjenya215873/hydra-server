@@ -115,6 +115,37 @@ class ProductKey(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class DefaultToken(Base):
+    """Default tokens for new users."""
+    __tablename__ = "default_tokens"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), unique=True, nullable=False, index=True)  # e.g., "SOL-USDT"
+    base = Column(String(50), nullable=False)  # e.g., "SOL"
+    quote = Column(String(50), default="USDT")  # e.g., "USDT"
+    
+    # DEX configuration
+    dexes = Column(JSON, nullable=True)  # ["pancake", "jupiter", "matcha"]
+    jupiter_mint = Column(String(100), nullable=True)
+    jupiter_decimals = Column(Integer, nullable=True)
+    bsc_address = Column(String(100), nullable=True)
+    mexc_price_scale = Column(Integer, nullable=True)
+    matcha_address = Column(String(100), nullable=True)
+    matcha_decimals = Column(Integer, nullable=True)
+    cg_id = Column(String(100), nullable=True)  # CoinGecko ID
+    
+    # Spread settings
+    spread_direct = Column(Boolean, default=True)
+    spread_reverse = Column(Boolean, default=True)
+    spread_threshold = Column(Float, nullable=True)
+    spread_direct_threshold = Column(Float, nullable=True)
+    spread_reverse_threshold = Column(Float, nullable=True)
+    
+    # Status
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ServerSettings(Base):
     """Global server settings."""
     __tablename__ = "server_settings"

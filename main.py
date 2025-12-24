@@ -18,14 +18,15 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from models import init_db, get_db, Token, SpreadHistory, Proxy, AdminUser, ServerSettings, ProductKey
+from models import init_db, get_db, Token, SpreadHistory, Proxy, AdminUser, ServerSettings, ProductKey, DefaultToken
 import models  # For accessing SessionLocal after init_db()
 from schemas import (
     TokenCreate, TokenUpdate, TokenResponse,
     ProxyCreate, ProxyBulkCreate, ProxyResponse,
     SpreadHistoryResponse, SpreadHistoryPoint,
     AdminLogin, AdminToken, ServerStats,
-    ProductKeyCreate, ProductKeyResponse, ProductKeyVerify
+    ProductKeyCreate, ProductKeyResponse, ProductKeyVerify,
+    DefaultTokenCreate, DefaultTokenResponse
 )
 from websocket_manager import connection_manager, handle_websocket_message
 from worker import price_worker
@@ -655,6 +656,101 @@ async def admin_toggle_key(
     key.is_active = not key.is_active
     db.commit()
     return {"status": "ok", "is_active": key.is_active}
+
+
+# ============== Admin: Default Tokens Management ==============
+
+@app.get("/api/admin/default-tokens", response_model=List[DefaultTokenResponse])
+async def admin_list_default_tokens(
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Список всех токенов по умолчанию (только админ)."""
+    return db.query(DefaultToken).order_by(DefaultToken.created_at.desc()).all()
+
+
+@app.post("/api/admin/default-tokens", response_model=DefaultTokenResponse)
+async def admin_create_default_token(
+    data: DefaultTokenCreate,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Добавить токен по умолчанию (только админ)."""
+    # Проверяем, нет ли уже такого токена
+    existing = db.query(DefaultToken).filter(DefaultToken.name == data.name).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Токен с таким именем уже существует")
+    
+    default_token = DefaultToken(
+        name=data.name,
+        base=data.base,
+        quote=data.quote,
+        dexes=data.dexes,
+        jupiter_mint=data.jupiter_mint,
+        jupiter_decimals=data.jupiter_decimals,
+        bsc_address=data.bsc_address,
+        mexc_price_scale=data.mexc_price_scale,
+        matcha_address=data.matcha_address,
+        matcha_decimals=data.matcha_decimals,
+        cg_id=data.cg_id,
+        spread_direct=data.spread_direct,
+        spread_reverse=data.spread_reverse,
+        spread_threshold=data.spread_threshold,
+        spread_direct_threshold=data.spread_direct_threshold,
+        spread_reverse_threshold=data.spread_reverse_threshold,
+        is_active=True
+    )
+    db.add(default_token)
+    db.commit()
+    db.refresh(default_token)
+    return default_token
+
+
+@app.delete("/api/admin/default-tokens/{token_id}")
+async def admin_delete_default_token(
+    token_id: int,
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Удалить токен по умолчанию (только админ)."""
+    token = db.query(DefaultToken).filter(DefaultToken.id == token_id).first()
+    if not token:
+        raise HTTPException(status_code=404, detail="Токен не найден")
+    
+    db.delete(token)
+    db.commit()
+    return {"status": "deleted", "token_id": token_id}
+
+
+# ============== Public: Get Default Tokens ==============
+
+@app.get("/api/default-tokens")
+async def get_default_tokens(db: Session = Depends(get_db)):
+    """Получить список токенов по умолчанию (публичный эндпоинт для клиента)."""
+    tokens = db.query(DefaultToken).filter(DefaultToken.is_active == True).all()
+    return {
+        "tokens": [
+            {
+                "name": t.name,
+                "base": t.base,
+                "quote": t.quote,
+                "dexes": t.dexes or [],
+                "jupiter_mint": t.jupiter_mint,
+                "jupiter_decimals": t.jupiter_decimals,
+                "bsc_address": t.bsc_address,
+                "mexc_price_scale": t.mexc_price_scale,
+                "matcha_address": t.matcha_address,
+                "matcha_decimals": t.matcha_decimals,
+                "cg_id": t.cg_id,
+                "spread_direct": t.spread_direct,
+                "spread_reverse": t.spread_reverse,
+                "spread_threshold": t.spread_threshold,
+                "spread_direct_threshold": t.spread_direct_threshold,
+                "spread_reverse_threshold": t.spread_reverse_threshold
+            }
+            for t in tokens
+        ]
+    }
 
 
 # ============== Public: Product Key Verification ==============

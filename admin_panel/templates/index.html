@@ -318,6 +318,7 @@
             <button class="tab active" data-tab="proxies">Прокси</button>
             <button class="tab" data-tab="tokens">Токены</button>
             <button class="tab" data-tab="keys">Ключи продукта</button>
+            <button class="tab" data-tab="default-tokens">Токены по умолчанию</button>
         </div>
         
         <!-- Proxies Tab -->
@@ -419,6 +420,82 @@ user2:pass2@192.168.1.2:1080"></textarea>
                 </table>
             </div>
         </div>
+        
+        <!-- Default Tokens Tab -->
+        <div class="tab-content" id="tab-default-tokens">
+            <div class="card">
+                <h2>Добавить токен по умолчанию</h2>
+                <p style="color: var(--text-secondary); margin-bottom: 15px;">Эти токены автоматически появятся у всех новых пользователей при первом запуске программы.</p>
+                <div class="inline-form" style="flex-wrap: wrap; gap: 10px;">
+                    <div class="form-group" style="min-width: 150px;">
+                        <label>Имя токена</label>
+                        <input type="text" id="defaultTokenName" placeholder="SOL-USDT">
+                    </div>
+                    <div class="form-group" style="min-width: 100px;">
+                        <label>Base</label>
+                        <input type="text" id="defaultTokenBase" placeholder="SOL">
+                    </div>
+                    <div class="form-group" style="min-width: 100px;">
+                        <label>Quote</label>
+                        <input type="text" id="defaultTokenQuote" placeholder="USDT" value="USDT">
+                    </div>
+                    <button class="btn btn-primary" onclick="addDefaultToken()" style="align-self: flex-end;">Добавить</button>
+                </div>
+                <div style="margin-top: 15px;">
+                    <details>
+                        <summary style="cursor: pointer; color: var(--accent-blue);">Дополнительные настройки</summary>
+                        <div style="margin-top: 15px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">
+                            <div class="form-group">
+                                <label>Jupiter Mint</label>
+                                <input type="text" id="defaultTokenJupiterMint" placeholder="Адрес минта">
+                            </div>
+                            <div class="form-group">
+                                <label>Jupiter Decimals</label>
+                                <input type="number" id="defaultTokenJupiterDecimals" placeholder="9">
+                            </div>
+                            <div class="form-group">
+                                <label>BSC Address</label>
+                                <input type="text" id="defaultTokenBscAddress" placeholder="Адрес BSC">
+                            </div>
+                            <div class="form-group">
+                                <label>Matcha Address</label>
+                                <input type="text" id="defaultTokenMatchaAddress" placeholder="Адрес Matcha">
+                            </div>
+                            <div class="form-group">
+                                <label>Matcha Decimals</label>
+                                <input type="number" id="defaultTokenMatchaDecimals" placeholder="18">
+                            </div>
+                            <div class="form-group">
+                                <label>CoinGecko ID</label>
+                                <input type="text" id="defaultTokenCgId" placeholder="solana">
+                            </div>
+                            <div class="form-group">
+                                <label>DEX (через запятую)</label>
+                                <input type="text" id="defaultTokenDexes" placeholder="jupiter,pancake,matcha">
+                            </div>
+                        </div>
+                    </details>
+                </div>
+                <div class="success-msg" id="defaultTokenSuccess"></div>
+            </div>
+            
+            <div class="card">
+                <h2>Список токенов по умолчанию</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Имя</th>
+                            <th>Base/Quote</th>
+                            <th>DEX</th>
+                            <th>Создан</th>
+                            <th>Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody id="defaultTokensTable"></tbody>
+                </table>
+            </div>
+        </div>
     </div>
     
     <script>
@@ -473,6 +550,7 @@ user2:pass2@192.168.1.2:1080"></textarea>
             loadHealthStatus();  // Загружаем статус здоровья прокси
             loadTokens();
             loadProductKeys();  // Загружаем ключи продукта
+            loadDefaultTokens();  // Загружаем токены по умолчанию
             
             // Refresh stats every 5 seconds
             setInterval(loadStats, 5000);
@@ -825,6 +903,99 @@ user2:pass2@192.168.1.2:1080"></textarea>
             try {
                 await apiCall(`/api/admin/keys/${id}`, 'DELETE');
                 loadProductKeys();
+            } catch (error) {
+                alert('Ошибка: ' + error.message);
+            }
+        }
+        
+        // ============== Default Tokens Functions ==============
+        
+        async function loadDefaultTokens() {
+            try {
+                const response = await apiCall('/api/admin/default-tokens');
+                const tokens = await response.json();
+                const tbody = document.getElementById('defaultTokensTable');
+                tbody.innerHTML = tokens.map(t => `
+                    <tr>
+                        <td>${t.id}</td>
+                        <td>${t.name}</td>
+                        <td>${t.base}/${t.quote}</td>
+                        <td>${(t.dexes || []).join(', ') || '-'}</td>
+                        <td>${new Date(t.created_at).toLocaleString()}</td>
+                        <td class="actions">
+                            <button class="btn btn-danger btn-small" onclick="deleteDefaultToken(${t.id})">
+                                Удалить
+                            </button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                console.error('Error loading default tokens:', error);
+            }
+        }
+        
+        async function addDefaultToken() {
+            const name = document.getElementById('defaultTokenName').value.trim();
+            const base = document.getElementById('defaultTokenBase').value.trim();
+            const quote = document.getElementById('defaultTokenQuote').value.trim() || 'USDT';
+            
+            if (!name || !base) {
+                alert('Введите имя токена и Base');
+                return;
+            }
+            
+            // Дополнительные поля
+            const jupiterMint = document.getElementById('defaultTokenJupiterMint').value.trim() || null;
+            const jupiterDecimals = document.getElementById('defaultTokenJupiterDecimals').value || null;
+            const bscAddress = document.getElementById('defaultTokenBscAddress').value.trim() || null;
+            const matchaAddress = document.getElementById('defaultTokenMatchaAddress').value.trim() || null;
+            const matchaDecimals = document.getElementById('defaultTokenMatchaDecimals').value || null;
+            const cgId = document.getElementById('defaultTokenCgId').value.trim() || null;
+            const dexesStr = document.getElementById('defaultTokenDexes').value.trim();
+            const dexes = dexesStr ? dexesStr.split(',').map(d => d.trim()).filter(d => d) : null;
+            
+            try {
+                const response = await apiCall('/api/admin/default-tokens', 'POST', {
+                    name,
+                    base,
+                    quote,
+                    jupiter_mint: jupiterMint,
+                    jupiter_decimals: jupiterDecimals ? parseInt(jupiterDecimals) : null,
+                    bsc_address: bscAddress,
+                    matcha_address: matchaAddress,
+                    matcha_decimals: matchaDecimals ? parseInt(matchaDecimals) : null,
+                    cg_id: cgId,
+                    dexes
+                });
+                const result = await response.json();
+                document.getElementById('defaultTokenSuccess').textContent = `Токен ${result.name} добавлен!`;
+                
+                // Очищаем форму
+                document.getElementById('defaultTokenName').value = '';
+                document.getElementById('defaultTokenBase').value = '';
+                document.getElementById('defaultTokenQuote').value = 'USDT';
+                document.getElementById('defaultTokenJupiterMint').value = '';
+                document.getElementById('defaultTokenJupiterDecimals').value = '';
+                document.getElementById('defaultTokenBscAddress').value = '';
+                document.getElementById('defaultTokenMatchaAddress').value = '';
+                document.getElementById('defaultTokenMatchaDecimals').value = '';
+                document.getElementById('defaultTokenCgId').value = '';
+                document.getElementById('defaultTokenDexes').value = '';
+                
+                loadDefaultTokens();
+                setTimeout(() => {
+                    document.getElementById('defaultTokenSuccess').textContent = '';
+                }, 5000);
+            } catch (error) {
+                alert('Ошибка добавления токена: ' + error.message);
+            }
+        }
+        
+        async function deleteDefaultToken(id) {
+            if (!confirm('Удалить этот токен по умолчанию?')) return;
+            try {
+                await apiCall(`/api/admin/default-tokens/${id}`, 'DELETE');
+                loadDefaultTokens();
             } catch (error) {
                 alert('Ошибка: ' + error.message);
             }
