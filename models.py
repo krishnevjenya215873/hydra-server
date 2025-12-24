@@ -196,9 +196,20 @@ def migrate_default_tokens(db):
     
     inspector = inspect(db.bind)
     
-    # Check if default_tokens table exists and has old structure
+    # Check if default_tokens table exists
     if 'default_tokens' in inspector.get_table_names():
         columns = [col['name'] for col in inspector.get_columns('default_tokens')]
+        
+        # If table has token_id column, clean up any NULL values
+        if 'token_id' in columns:
+            try:
+                result = db.execute(text("DELETE FROM default_tokens WHERE token_id IS NULL"))
+                if result.rowcount > 0:
+                    db.commit()
+                    print(f"Cleaned up {result.rowcount} default_tokens with NULL token_id")
+            except Exception as e:
+                print(f"Cleanup error: {e}")
+                db.rollback()
         
         # If table has old structure (has 'name' column but not 'token_id')
         if 'name' in columns and 'token_id' not in columns:
