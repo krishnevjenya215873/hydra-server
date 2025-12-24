@@ -97,6 +97,27 @@ class PriceFetcher:
         
         return client
     
+    def _get_client_cached(self):
+        """Get HTTP client with proxy from cache - NO DB session required.
+        OPTIMIZED: Uses cached proxy list for parallel thread safety.
+        """
+        # Get proxy from cache (no DB required)
+        proxy_url = proxy_manager.get_proxy_url_cached()
+        
+        # Create new scraper with proxy
+        client = cloudscraper.create_scraper(
+            browser={
+                "browser": "chrome",
+                "platform": "windows",
+                "mobile": False
+            }
+        )
+        
+        if proxy_url:
+            client.proxies = {"http": proxy_url, "https": proxy_url}
+        
+        return client
+    
     def _throttle(self):
         """Throttling disabled - each request uses its own proxy."""
         pass  # No throttling needed with proxy rotation
@@ -106,8 +127,10 @@ class PriceFetcher:
     _mexc_cache_time: float = 0
     _mexc_cache_ttl: float = 1.0  # Cache valid for 1 second
     
-    def get_all_mexc_prices(self, db: Session, max_retries: int = 2) -> Dict[str, Tuple[float, float]]:
-        """Get ALL futures prices from MEXC in ONE request. Returns dict of symbol -> (bid, ask)."""
+    def get_all_mexc_prices(self, max_retries: int = 2) -> Dict[str, Tuple[float, float]]:
+        """Get ALL futures prices from MEXC in ONE request. Returns dict of symbol -> (bid, ask).
+        OPTIMIZED: No DB session required - uses cached proxy list.
+        """
         current_time = time.time()
         
         # Return cached data if still valid
@@ -116,7 +139,8 @@ class PriceFetcher:
         
         for attempt in range(max_retries):
             try:
-                proxy_url = proxy_manager.get_proxy_url(db)
+                # Get proxy from cache (no DB required)
+                proxy_url = proxy_manager.get_proxy_url_cached()
                 transport = None
                 if proxy_url:
                     transport = httpx.HTTPTransport(proxy=proxy_url)
@@ -142,7 +166,6 @@ class PriceFetcher:
                     # Update cache
                     self._mexc_prices_cache = prices
                     self._mexc_cache_time = current_time
-                    proxy_manager.mark_proxy_success(db)
                     logger.debug(f"MEXC batch: fetched {len(prices)} prices")
                     return prices
                 
@@ -256,8 +279,10 @@ class PriceFetcher:
         
         return None, None
     
-    def get_pancake_price_usdt(self, db: Session, token_address: str, max_retries: int = 2) -> Optional[float]:
-        """Get token price in USDT via DexScreener (PancakeSwap). Retries with different proxy on failure."""
+    def get_pancake_price_usdt(self, token_address: str, max_retries: int = 2) -> Optional[float]:
+        """Get token price in USDT via DexScreener (PancakeSwap). Retries with different proxy on failure.
+        OPTIMIZED: No DB session required - uses cached proxy list.
+        """
         addr = (token_address or "").strip()
         if not addr:
             return None
@@ -265,14 +290,12 @@ class PriceFetcher:
         url = f"{DEXSCREENER_TOKENS_URL}/{addr}"
         
         for attempt in range(max_retries):
-            client = self._get_client(db)
-            self._throttle()
+            client = self._get_client_cached()  # No DB required
             
             try:
                 resp = client.get(url, timeout=DEXSCREENER_TIMEOUT)
                 if resp.status_code != 200:
                     logger.warning(f"Pancake: HTTP {resp.status_code} for {addr}, switching proxy (attempt {attempt + 1}/{max_retries})")
-                    # Removed: proxy deactivation moved to health checker
                     continue
             
                 data = resp.json()
@@ -323,12 +346,10 @@ class PriceFetcher:
                 else:
                     return None
                 
-                proxy_manager.mark_proxy_success(db)
                 return float(best.get("priceUsd"))
                 
             except Exception as e:
                 logger.error(f"Pancake: error for {addr}: {e}")
-                # Removed: proxy deactivation moved to health checker
                 if attempt < max_retries - 1:
                     continue
         
@@ -336,12 +357,13 @@ class PriceFetcher:
     
     def get_jupiter_price_usdt(
         self, 
-        db: Session,
         mint: str, 
         decimals: int,
         max_retries: int = 2
     ) -> Optional[float]:
-        """Get token price in USDT via Jupiter Quote API. Uses httpx with proxy and caching."""
+        """Get token price in USDT via Jupiter Quote API. Uses httpx with proxy and caching.
+        OPTIMIZED: No DB session required - uses cached proxy list.
+        """
         mint = (mint or "").strip()
         if not mint:
             return None
@@ -362,8 +384,8 @@ class PriceFetcher:
         # Use httpx with proxy (faster than cloudscraper)
         for attempt in range(max_retries):
             try:
-                # Get proxy for this request
-                proxy_url = proxy_manager.get_proxy_url(db)
+                # Get proxy from cache (no DB required)
+                proxy_url = proxy_manager.get_proxy_url_cached()
                 
                 # Configure httpx with proxy
                 transport = None
@@ -383,7 +405,6 @@ class PriceFetcher:
                 
                 if resp.status_code != 200:
                     logger.warning(f"Jupiter: HTTP {resp.status_code} for mint={mint} (attempt {attempt + 1}/{max_retries})")
-                    # Removed: proxy deactivation moved to health checker
                     continue
                 
                 data = resp.json()
@@ -407,13 +428,11 @@ class PriceFetcher:
                 # Cache the result
                 _jupiter_price_cache[mint] = (price_float, time.time())
                 
-                proxy_manager.mark_proxy_success(db)
                 logger.debug(f"Jupiter: 1 TOKEN ({mint}) = {price_float:.8f} USDT")
                 return price_float
                 
             except Exception as e:
                 logger.error(f"Jupiter: error for mint={mint}: {e}")
-                # Removed: proxy deactivation moved to health checker
                 if attempt < max_retries - 1:
                     continue
         
@@ -431,24 +450,15 @@ class PriceFetcher:
             )
         return self._matcha_scraper
     
-    def _refresh_matcha_jwt(self, db: Session) -> bool:
-        """Refresh JWT token from Matcha API using cloudscraper with proxy."""
-        # Get proxy for Matcha request FIRST
-        proxy_url = proxy_manager.get_proxy_url(db)
-        if not proxy_url:
-            logger.warning("Matcha JWT: No proxy available, skipping request")
-            return False
-        
-        proxies = {"http": proxy_url, "https": proxy_url}
-        
-        # DEBUG: Log request details
-        import ssl
-        import sys
-        logger.info(f"=== MATCHA JWT REQUEST DEBUG ===")
-        logger.info(f"Python: {sys.version}")
-        logger.info(f"OpenSSL: {ssl.OPENSSL_VERSION}")
-        logger.info(f"URL: {MATCHA_JWT_URL}")
-        logger.info(f"Proxy URL: {proxy_url}")
+    def _refresh_matcha_jwt(self) -> bool:
+        """Refresh JWT token from Matcha API using cloudscraper with proxy.
+        OPTIMIZED: No DB session required - uses cached proxy list.
+        """
+        # Get proxy from cache (no DB required)
+        proxy_url = proxy_manager.get_proxy_url_cached()
+        proxies = None
+        if proxy_url:
+            proxies = {"http": proxy_url, "https": proxy_url}
         
         # Create FRESH scraper for each JWT request
         scraper = cloudscraper.create_scraper(
@@ -458,7 +468,6 @@ class PriceFetcher:
                 "mobile": False
             }
         )
-        logger.info(f"Cloudscraper: {cloudscraper.__version__}, interpreter={scraper.interpreter}")
         
         try:
             resp = scraper.get(
@@ -467,8 +476,6 @@ class PriceFetcher:
                 proxies=proxies,
                 timeout=30.0,
             )
-            logger.info(f"Response: status={resp.status_code}")
-            logger.info(f"=== END MATCHA JWT REQUEST DEBUG ===")
             
             if resp.status_code != 200:
                 logger.warning(f"Matcha JWT: HTTP {resp.status_code}")
@@ -481,7 +488,6 @@ class PriceFetcher:
             if token:
                 self._matcha_jwt_token = token
                 self._matcha_jwt_exp = exp - 10
-                proxy_manager.mark_proxy_success(db)
                 logger.info(f"Matcha JWT: obtained new token (valid for ~{exp - time.time():.0f}s)")
                 return True
             else:
@@ -492,8 +498,10 @@ class PriceFetcher:
             logger.error(f"Matcha JWT: error getting token: {e}")
             return False
     
-    def _get_matcha_jwt(self, db: Session) -> Optional[str]:
-        """Get cached JWT token, refreshing if expired."""
+    def _get_matcha_jwt(self) -> Optional[str]:
+        """Get cached JWT token, refreshing if expired.
+        OPTIMIZED: No DB session required.
+        """
         current_time = time.time()
         
         # Check if token is still valid
@@ -501,19 +509,20 @@ class PriceFetcher:
             return self._matcha_jwt_token
         
         # Token expired or doesn't exist - refresh
-        if self._refresh_matcha_jwt(db):
+        if self._refresh_matcha_jwt():
             return self._matcha_jwt_token
         
         return None
     
     def get_matcha_price_usdt(
         self,
-        db: Session,
         token_address: str,
         token_decimals: int = MATCHA_DEFAULT_SELL_DECIMALS,
         max_retries: int = 3
     ) -> Optional[float]:
-        """Get token price in USDT via Matcha. Uses cached JWT token."""
+        """Get token price in USDT via Matcha. Uses cached JWT token.
+        OPTIMIZED: No DB session required - uses cached proxy list.
+        """
         token_address = (token_address or "").strip()
         if not token_address:
             return None
@@ -526,8 +535,8 @@ class PriceFetcher:
         
         for attempt in range(max_retries):
             try:
-                # Get cached or fresh JWT token
-                jwt_token = self._get_matcha_jwt(db)
+                # Get cached or fresh JWT token (no DB required)
+                jwt_token = self._get_matcha_jwt()
                 if not jwt_token:
                     logger.warning(f"Matcha: failed to get JWT (attempt {attempt + 1}/{max_retries})")
                     # Reset scraper and try again
@@ -540,8 +549,8 @@ class PriceFetcher:
                 headers = MATCHA_HEADERS.copy()
                 headers["X-Matcha-Jwt"] = jwt_token
                 
-                # Get proxy for Matcha request
-                proxy_url = proxy_manager.get_proxy_url(db)
+                # Get proxy from cache (no DB required)
+                proxy_url = proxy_manager.get_proxy_url_cached()
                 proxies = None
                 if proxy_url:
                     proxies = {"http": proxy_url, "https": proxy_url}
@@ -655,35 +664,23 @@ class PriceFetcher:
             return self.get_mexc_price_from_cache(base, quote, token.mexc_price_scale)
         
         def fetch_jupiter():
-            """Fetch Jupiter price in separate thread with own DB session."""
+            """Fetch Jupiter price - NO DB session required."""
             if "jupiter" not in allowed or not token.jupiter_mint or token.jupiter_decimals is None:
                 return None
-            thread_db = models.SessionLocal()
-            try:
-                return self.get_jupiter_price_usdt(thread_db, token.jupiter_mint, token.jupiter_decimals)
-            finally:
-                thread_db.close()
+            return self.get_jupiter_price_usdt(token.jupiter_mint, token.jupiter_decimals)
         
         def fetch_pancake():
-            """Fetch Pancake price in separate thread with own DB session."""
+            """Fetch Pancake price - NO DB session required."""
             if "pancake" not in allowed or not token.bsc_address:
                 return None
-            thread_db = models.SessionLocal()
-            try:
-                return self.get_pancake_price_usdt(thread_db, token.bsc_address)
-            finally:
-                thread_db.close()
+            return self.get_pancake_price_usdt(token.bsc_address)
         
         def fetch_matcha():
-            """Fetch Matcha price in separate thread with own DB session."""
+            """Fetch Matcha price - NO DB session required."""
             if "matcha" not in allowed or not token.matcha_address:
                 return None
-            thread_db = models.SessionLocal()
-            try:
-                decimals = token.matcha_decimals or MATCHA_DEFAULT_SELL_DECIMALS
-                return self.get_matcha_price_usdt(thread_db, token.matcha_address, decimals)
-            finally:
-                thread_db.close()
+            decimals = token.matcha_decimals or MATCHA_DEFAULT_SELL_DECIMALS
+            return self.get_matcha_price_usdt(token.matcha_address, decimals)
         
         # Execute ALL requests in PARALLEL
         cex_bid, cex_ask = None, None

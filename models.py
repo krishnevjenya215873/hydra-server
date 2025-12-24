@@ -163,10 +163,11 @@ def create_db_engine():
         print("Creating engine...", flush=True)
         engine = create_engine(
             DATABASE_URL,
-            pool_size=5,
-            max_overflow=10,
+            pool_size=20,
+            max_overflow=30,
             pool_pre_ping=True,
             pool_recycle=300,
+            pool_timeout=60,  # Wait longer for connection
             connect_args={"connect_timeout": 30},  # Increased timeout
             echo=False
         )

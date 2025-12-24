@@ -31,7 +31,7 @@ from schemas import (
 from websocket_manager import connection_manager, handle_websocket_message
 from worker import price_worker
 from admin_routes import router as admin_router
-from proxy_manager import proxy_health_checker
+from proxy_manager import proxy_health_checker, proxy_manager
 
 # Configure logging
 logging.basicConfig(
@@ -205,6 +205,18 @@ async def lifespan(app: FastAPI):
     
     # Start price worker only if DB is connected
     if db_connected and models.SessionLocal:
+        # Initialize proxy cache BEFORE starting worker
+        # This ensures parallel threads can use cached proxies without DB sessions
+        try:
+            db = models.SessionLocal()
+            try:
+                proxy_manager.force_refresh_cache(db)
+                logger.info(f"Proxy cache initialized: {len(proxy_manager._proxy_cache)} proxies")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to initialize proxy cache: {e}")
+        
         price_worker.register_callback(on_price_update)
         price_worker.start()
         

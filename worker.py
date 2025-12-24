@@ -104,8 +104,8 @@ class PriceWorker:
                 time.sleep(1)
                 return
             
-            # OPTIMIZATION: Fetch ALL MEXC prices in ONE request first
-            price_fetcher.get_all_mexc_prices(db)
+            # OPTIMIZATION: Fetch ALL MEXC prices in ONE request first (no DB required)
+            price_fetcher.get_all_mexc_prices()
             
             # Create list of token IDs to fetch
             token_ids = [(t.id, t.name) for t in tokens]

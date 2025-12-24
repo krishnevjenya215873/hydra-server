@@ -100,6 +100,31 @@ class ProxyManager:
         logger.info(f"Selected proxy ID={proxy['id']}: {display_url}")
         return url
     
+    def get_proxy_url_cached(self) -> Optional[str]:
+        """Get proxy URL from cache WITHOUT requiring DB session.
+        This is safe to call from parallel threads without creating DB connections.
+        Returns None if cache is empty (will make direct request).
+        """
+        if not self._proxy_cache:
+            logger.debug("get_proxy_url_cached: Cache empty, no proxy available")
+            return None
+        
+        # Pick random proxy from cache
+        proxy = random.choice(self._proxy_cache)
+        self._current_proxy = proxy
+        
+        protocol = proxy["protocol"].lower()
+        proxy_string = proxy["proxy_string"]
+        
+        # Build URL
+        if "://" in proxy_string:
+            url = proxy_string
+        else:
+            scheme = "socks5" if protocol.startswith("socks") else "http"
+            url = f"{scheme}://{proxy_string}"
+        
+        return url
+    
     def get_proxies_dict(self, db: Session) -> Dict[str, str]:
         """Get proxies dict for requests library."""
         url = self.get_proxy_url(db)
