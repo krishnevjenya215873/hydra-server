@@ -16,7 +16,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from models import init_db, get_db, Token, SpreadHistory, Proxy, AdminUser, ServerSettings, ProductKey, DefaultToken
 import models  # For accessing SessionLocal after init_db()
@@ -389,6 +389,18 @@ async def admin_delete_token(
     if not token:
         raise HTTPException(status_code=404, detail="Token not found")
     
+    token_id = token.id
+    
+    # First delete spread history directly via SQL (faster than ORM cascade)
+    try:
+        db.execute(
+            text("DELETE FROM spread_history WHERE token_id = :token_id"),
+            {"token_id": token_id}
+        )
+    except Exception as e:
+        logger.warning(f"Error deleting spread history for token {token_name}: {e}")
+    
+    # Now delete the token itself
     db.delete(token)
     db.commit()
     logger.info(f"Token deleted by admin: {token_name}")
