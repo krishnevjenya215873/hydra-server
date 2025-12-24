@@ -36,6 +36,7 @@ class Token(Base):
     jupiter_decimals = Column(Integer, nullable=True)
     bsc_address = Column(String(100), nullable=True)
     mexc_price_scale = Column(Integer, nullable=True)
+    mexc_symbol = Column(String(50), nullable=True)  # MEXC base symbol (e.g., "ARCSOL" for ARC)
     matcha_address = Column(String(100), nullable=True)
     matcha_decimals = Column(Integer, nullable=True)
     cg_id = Column(String(100), nullable=True)  # CoinGecko ID

@@ -32,6 +32,7 @@ from websocket_manager import connection_manager, handle_websocket_message
 from worker import price_worker
 from admin_routes import router as admin_router
 from proxy_manager import proxy_health_checker, proxy_manager
+from mexc_token_matcher import find_matching_mexc_symbol, find_potential_mexc_symbols
 
 # Configure logging
 logging.basicConfig(
@@ -340,15 +341,41 @@ async def create_token(token_data: TokenCreate, db: Session = Depends(get_db)):
             return existing
         raise HTTPException(status_code=400, detail="Token already exists")
     
+    # Auto-detect mexc_symbol if jupiter_mint is provided and mexc_symbol is not set
+    mexc_symbol = token_data.mexc_symbol
+    if not mexc_symbol and token_data.jupiter_mint:
+        # Get proxy URL for MEXC page requests
+        proxy_url = proxy_manager.get_proxy_url_cached()
+        
+        # Try to find matching MEXC symbol
+        logger.info(f"Auto-detecting MEXC symbol for {normalized_base} with mint {token_data.jupiter_mint}")
+        mexc_symbol = find_matching_mexc_symbol(
+            base_token=normalized_base,
+            jupiter_mint=token_data.jupiter_mint,
+            proxy_url=proxy_url
+        )
+        
+        if mexc_symbol:
+            logger.info(f"Found MEXC symbol for {normalized_base}: {mexc_symbol}")
+        else:
+            # Check if there are potential matches on MEXC
+            potential = find_potential_mexc_symbols(normalized_base)
+            if potential:
+                logger.warning(f"MEXC symbols found for {normalized_base} but contract mismatch: {potential}")
+            else:
+                logger.info(f"No MEXC futures for {normalized_base}, will use base symbol")
+    
     # Create token with normalized name
     token_dict = token_data.dict()
     token_dict['name'] = normalized_name
     token_dict['base'] = normalized_base
+    if mexc_symbol:
+        token_dict['mexc_symbol'] = mexc_symbol
     token = Token(**token_dict)
     db.add(token)
     db.commit()
     db.refresh(token)
-    logger.info(f"Token created: {token.name}")
+    logger.info(f"Token created: {token.name} (mexc_symbol={token.mexc_symbol})")
     return token
 
 
@@ -834,6 +861,23 @@ async def admin_create_default_token(
     token = db.query(Token).filter(Token.name == normalized_name).first()
     
     if not token:
+        # Auto-detect mexc_symbol if jupiter_mint is provided and mexc_symbol is not set
+        mexc_symbol = data.mexc_symbol
+        if not mexc_symbol and data.jupiter_mint:
+            proxy_url = proxy_manager.get_proxy_url_cached()
+            logger.info(f"Auto-detecting MEXC symbol for {normalized_base} with mint {data.jupiter_mint}")
+            mexc_symbol = find_matching_mexc_symbol(
+                base_token=normalized_base,
+                jupiter_mint=data.jupiter_mint,
+                proxy_url=proxy_url
+            )
+            if mexc_symbol:
+                logger.info(f"Found MEXC symbol for {normalized_base}: {mexc_symbol}")
+            else:
+                potential = find_potential_mexc_symbols(normalized_base)
+                if potential:
+                    logger.warning(f"MEXC symbols found for {normalized_base} but contract mismatch: {potential}")
+        
         # Создаём токен в основной таблице
         token = Token(
             name=normalized_name,
@@ -844,6 +888,7 @@ async def admin_create_default_token(
             jupiter_decimals=data.jupiter_decimals,
             bsc_address=data.bsc_address,
             mexc_price_scale=data.mexc_price_scale,
+            mexc_symbol=mexc_symbol,
             matcha_address=data.matcha_address,
             matcha_decimals=data.matcha_decimals,
             cg_id=data.cg_id,
@@ -857,7 +902,7 @@ async def admin_create_default_token(
         db.add(token)
         db.commit()
         db.refresh(token)
-        logger.info(f"Created new token: {normalized_name}")
+        logger.info(f"Created new token: {normalized_name} (mexc_symbol={mexc_symbol})")
     
     # Проверяем нет ли уже в DefaultTokens
     existing_default = db.query(DefaultToken).filter(DefaultToken.token_id == token.id).first()
@@ -967,6 +1012,18 @@ async def admin_bulk_add_default_tokens(
                 # Проверяем/создаём Token (имя уже нормализовано)
                 token = db.query(Token).filter(Token.name == token_name).first()
                 if not token:
+                    # Auto-detect mexc_symbol for Jupiter tokens
+                    mexc_symbol = None
+                    if jupiter_mint:
+                        proxy_url = proxy_manager.get_proxy_url_cached()
+                        mexc_symbol = find_matching_mexc_symbol(
+                            base_token=token_symbol,
+                            jupiter_mint=jupiter_mint,
+                            proxy_url=proxy_url
+                        )
+                        if mexc_symbol:
+                            logger.info(f"Found MEXC symbol for {token_symbol}: {mexc_symbol}")
+                    
                     token = Token(
                         name=token_name,
                         base=token_symbol,
@@ -977,6 +1034,7 @@ async def admin_bulk_add_default_tokens(
                         bsc_address=bsc_address,
                         matcha_address=matcha_address,
                         matcha_decimals=matcha_decimals,
+                        mexc_symbol=mexc_symbol,
                         is_active=True
                     )
                     db.add(token)

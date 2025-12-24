@@ -661,7 +661,9 @@ class PriceFetcher:
             """Get MEXC price from cache (batch fetched in worker)."""
             # OPTIMIZED: MEXC prices are pre-fetched in batch by worker
             # Just get from cache - no network request needed
-            return self.get_mexc_price_from_cache(base, quote, token.mexc_price_scale)
+            # Use mexc_symbol if set, otherwise fall back to base
+            mexc_base = token.mexc_symbol if token.mexc_symbol else base
+            return self.get_mexc_price_from_cache(mexc_base, quote, token.mexc_price_scale)
         
         def fetch_jupiter():
             """Fetch Jupiter price - NO DB session required."""

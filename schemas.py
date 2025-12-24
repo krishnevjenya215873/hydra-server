@@ -18,6 +18,7 @@ class TokenBase(BaseModel):
     jupiter_decimals: Optional[int] = None
     bsc_address: Optional[str] = None
     mexc_price_scale: Optional[int] = None
+    mexc_symbol: Optional[str] = None  # MEXC base symbol (e.g., "ARCSOL")
     matcha_address: Optional[str] = None
     matcha_decimals: Optional[int] = None
     cg_id: Optional[str] = None
@@ -41,6 +42,7 @@ class TokenUpdate(BaseModel):
     jupiter_decimals: Optional[int] = None
     bsc_address: Optional[str] = None
     mexc_price_scale: Optional[int] = None
+    mexc_symbol: Optional[str] = None
     matcha_address: Optional[str] = None
     matcha_decimals: Optional[int] = None
     cg_id: Optional[str] = None
@@ -200,6 +202,7 @@ class DefaultTokenResponse(BaseModel):
     jupiter_decimals: Optional[int] = None
     bsc_address: Optional[str] = None
     mexc_price_scale: Optional[int] = None
+    mexc_symbol: Optional[str] = None
     matcha_address: Optional[str] = None
     matcha_decimals: Optional[int] = None
     cg_id: Optional[str] = None
