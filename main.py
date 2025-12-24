@@ -454,7 +454,16 @@ async def admin_delete_token(
     
     token_id = token.id
     
-    # First delete spread history directly via SQL (faster than ORM cascade)
+    # First delete from default_tokens (if linked)
+    try:
+        db.execute(
+            text("DELETE FROM default_tokens WHERE token_id = :token_id"),
+            {"token_id": token_id}
+        )
+    except Exception as e:
+        logger.warning(f"Error deleting default_token for token {token_name}: {e}")
+    
+    # Then delete spread history directly via SQL (faster than ORM cascade)
     try:
         db.execute(
             text("DELETE FROM spread_history WHERE token_id = :token_id"),
