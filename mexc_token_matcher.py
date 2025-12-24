@@ -33,6 +33,14 @@ BROWSER_HEADERS = {
 _mexc_symbols_cache: List[Dict] = []
 _cache_loaded: bool = False
 
+# Специальные символы, которые нужно удалять при поиске
+SPECIAL_CHARS = re.compile(r'[$#@!%^&*()\-+=/\\|<>?~`]')
+
+
+def clean_token_name(name: str) -> str:
+    """Удаляет специальные символы из имени токена для поиска на MEXC."""
+    return SPECIAL_CHARS.sub('', name).strip()
+
 
 def load_mexc_symbols(force_reload: bool = False) -> List[Dict]:
     """Load all MEXC futures symbols from API."""
@@ -62,12 +70,18 @@ def find_potential_mexc_symbols(base_token: str, quote: str = "USDT") -> List[st
     """
     Find all potential MEXC symbols for a given base token.
     Returns list of symbols sorted by relevance (exact > prefix > suffix > contains).
+    Автоматически удаляет специальные символы ($, # и т.д.) из имени токена.
     """
     symbols = load_mexc_symbols()
     if not symbols:
         return []
     
-    base_upper = base_token.upper()
+    # Очищаем имя токена от специальных символов
+    base_upper = clean_token_name(base_token).upper()
+    logger.info(f"Searching MEXC symbols for '{base_token}' -> cleaned: '{base_upper}'")
+    
+    if not base_upper:
+        return []
     quote_upper = quote.upper()
     
     exact = []

@@ -180,8 +180,13 @@ class PriceFetcher:
         return {}
     
     def get_mexc_price_from_cache(self, base: str, quote: str = "USDT", price_scale: Optional[int] = None) -> Tuple[Optional[float], Optional[float]]:
-        """Get MEXC price from cached batch data."""
-        symbol = f"{base.upper()}_{quote.upper()}"
+        """Get MEXC price from cached batch data.
+        Автоматически очищает специальные символы ($, # и т.д.) из имени токена.
+        """
+        import re
+        # Удаляем специальные символы из имени токена
+        clean_base = re.sub(r'[$#@!%^&*()\-+=/\\|<>?~`]', '', base).strip()
+        symbol = f"{clean_base.upper()}_{quote.upper()}"
         if symbol in self._mexc_prices_cache:
             bid, ask = self._mexc_prices_cache[symbol]
             if isinstance(price_scale, int) and price_scale >= 0:
