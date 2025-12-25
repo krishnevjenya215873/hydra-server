@@ -44,76 +44,95 @@ logger = logging.getLogger(__name__)
 # Server start time for uptime calculation
 SERVER_START_TIME = time.time()
 
-# Solana RPC for getting token decimals
-SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
+# Solana RPC endpoints for getting token decimals (multiple for reliability)
+SOLANA_RPC_URLS = [
+    "https://api.mainnet-beta.solana.com",
+    "https://solana-mainnet.g.alchemy.com/v2/demo",
+    "https://rpc.ankr.com/solana",
+]
+SOLANA_RPC_URL = SOLANA_RPC_URLS[0]  # Default for backward compatibility
 
 # Cache for token decimals to avoid repeated RPC calls
+# Only caches SUCCESSFUL results, not defaults
 DECIMALS_CACHE: Dict[str, int] = {}
 
 def get_solana_token_decimals(mint_address: str) -> int:
-    """Get token decimals from Solana RPC with caching. Returns 6 as default if fails."""
-    # Check cache first
+    """Get token decimals from Solana RPC with caching and retry.
+    Uses multiple RPC endpoints for reliability.
+    Returns 6 as default ONLY if all attempts fail, but does NOT cache the default.
+    """
+    # Check cache first - only contains verified values
     if mint_address in DECIMALS_CACHE:
         return DECIMALS_CACHE[mint_address]
     
     import httpx
-    try:
-        response = httpx.post(
-            SOLANA_RPC_URL,
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getTokenSupply",
-                "params": [mint_address]
-            },
-            timeout=3.0  # Reduced timeout for faster response
-        )
-        if response.status_code == 200:
-            data = response.json()
-            decimals = data.get("result", {}).get("value", {}).get("decimals")
-            if decimals is not None:
-                DECIMALS_CACHE[mint_address] = int(decimals)
-                logger.info(f"Solana RPC: decimals for {mint_address} = {decimals}")
-                return int(decimals)
-    except Exception as e:
-        logger.warning(f"Solana RPC error for {mint_address}: {e}")
     
-    # Default to 6 (most common for Solana tokens)
-    DECIMALS_CACHE[mint_address] = 6
-    logger.warning(f"Using default decimals=6 for {mint_address}")
-    return 6
-
-
-async def get_solana_token_decimals_async(mint_address: str) -> int:
-    """Async version: Get token decimals from Solana RPC with caching."""
-    import httpx
-    
-    # Check cache first
-    if mint_address in DECIMALS_CACHE:
-        return DECIMALS_CACHE[mint_address]
-    
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            response = await client.post(
-                SOLANA_RPC_URL,
+    # Try each RPC endpoint
+    for rpc_url in SOLANA_RPC_URLS:
+        try:
+            response = httpx.post(
+                rpc_url,
                 json={
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "getTokenSupply",
                     "params": [mint_address]
-                }
+                },
+                timeout=5.0  # Increased timeout
             )
             if response.status_code == 200:
                 data = response.json()
                 decimals = data.get("result", {}).get("value", {}).get("decimals")
                 if decimals is not None:
                     DECIMALS_CACHE[mint_address] = int(decimals)
+                    logger.info(f"Solana RPC ({rpc_url}): decimals for {mint_address[:20]}... = {decimals}")
                     return int(decimals)
-    except Exception as e:
-        logger.warning(f"Async Solana RPC error for {mint_address}: {e}")
+        except Exception as e:
+            logger.debug(f"Solana RPC error ({rpc_url}) for {mint_address[:20]}...: {e}")
+            continue
     
-    # Default to 6
-    DECIMALS_CACHE[mint_address] = 6
+    # All RPC endpoints failed - return default but DO NOT cache it
+    # This allows retry on next request
+    logger.warning(f"All Solana RPC endpoints failed for {mint_address[:20]}..., using default decimals=6 (not cached)")
+    return 6
+
+
+async def get_solana_token_decimals_async(mint_address: str) -> int:
+    """Async version: Get token decimals from Solana RPC with caching and retry.
+    Uses multiple RPC endpoints for reliability.
+    """
+    import httpx
+    
+    # Check cache first - only contains verified values
+    if mint_address in DECIMALS_CACHE:
+        return DECIMALS_CACHE[mint_address]
+    
+    # Try each RPC endpoint
+    for rpc_url in SOLANA_RPC_URLS:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(
+                    rpc_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getTokenSupply",
+                        "params": [mint_address]
+                    }
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    decimals = data.get("result", {}).get("value", {}).get("decimals")
+                    if decimals is not None:
+                        DECIMALS_CACHE[mint_address] = int(decimals)
+                        logger.info(f"Async Solana RPC ({rpc_url}): decimals for {mint_address[:20]}... = {decimals}")
+                        return int(decimals)
+        except Exception as e:
+            logger.debug(f"Async Solana RPC error ({rpc_url}) for {mint_address[:20]}...: {e}")
+            continue
+    
+    # All RPC endpoints failed - return default but DO NOT cache it
+    logger.warning(f"All async Solana RPC endpoints failed for {mint_address[:20]}..., using default decimals=6 (not cached)")
     return 6
 
 
@@ -1317,6 +1336,54 @@ async def admin_bulk_add_default_tokens(
                 
         except Exception as e:
             results["failed"].append({"address": address, "error": str(e)})
+    
+    return results
+
+
+@app.post("/api/admin/fix-jupiter-decimals")
+async def admin_fix_jupiter_decimals(
+    admin_token: str = Depends(get_admin_token),
+    db: Session = Depends(get_db)
+):
+    """Исправить decimals для всех Jupiter токенов.
+    
+    Получает реальные decimals из Solana RPC и обновляет в базе данных.
+    """
+    # Получаем все токены с jupiter_mint
+    tokens = db.query(Token).filter(Token.jupiter_mint.isnot(None)).all()
+    
+    results = {
+        "updated": [],
+        "unchanged": [],
+        "failed": []
+    }
+    
+    for token in tokens:
+        try:
+            # Получаем реальные decimals
+            real_decimals = get_solana_token_decimals(token.jupiter_mint)
+            
+            if token.jupiter_decimals != real_decimals:
+                old_decimals = token.jupiter_decimals
+                token.jupiter_decimals = real_decimals
+                db.commit()
+                results["updated"].append({
+                    "name": token.name,
+                    "mint": token.jupiter_mint[:20] + "...",
+                    "old_decimals": old_decimals,
+                    "new_decimals": real_decimals
+                })
+                logger.info(f"Fixed decimals for {token.name}: {old_decimals} -> {real_decimals}")
+            else:
+                results["unchanged"].append({
+                    "name": token.name,
+                    "decimals": real_decimals
+                })
+        except Exception as e:
+            results["failed"].append({
+                "name": token.name,
+                "error": str(e)
+            })
     
     return results
 
