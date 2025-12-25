@@ -419,6 +419,16 @@ class PriceFetcher:
                     logger.debug(f"Jupiter: no outAmount for mint={mint}")
                     return None
                 
+                # Check priceImpact - if > 100%, it's an anomaly (liquidity issue)
+                price_impact = data.get("priceImpact", 0)
+                if price_impact and float(price_impact) > 100:
+                    logger.warning(f"Jupiter ANOMALY (priceImpact): mint={mint[:12]}... priceImpact={price_impact}% > 100% - using cached")
+                    if mint in _jupiter_price_cache:
+                        cached_price, _ = _jupiter_price_cache[mint]
+                        if cached_price > 0.0000001:
+                            return cached_price
+                    return None
+                
                 out_amount_raw = int(out_amount_str)
                 if out_amount_raw <= 0:
                     return None
