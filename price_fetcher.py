@@ -441,17 +441,8 @@ class PriceFetcher:
                             return cached_price
                     return None
                 
-                # RELATIVE validation - reject sudden large changes
-                if mint in _jupiter_price_cache:
-                    cached_price, _ = _jupiter_price_cache[mint]
-                    if cached_price > 0.0000001:  # Only compare with valid cached prices
-                        price_change_ratio = abs(price_float - cached_price) / cached_price
-                        # If price changed more than 90%, it's likely an anomaly - use cached value
-                        if price_change_ratio > 0.9:
-                            logger.warning(f"Jupiter ANOMALY (relative): mint={mint[:12]}... new=${price_float:.8f} cached=${cached_price:.8f} change={price_change_ratio*100:.1f}% - using cached")
-                            return cached_price
-                
-                # Cache the result (only valid prices reach here)
+                # Cache the result - relative validation moved to fetch_token_data
+                # where we have access to MEXC price for cross-validation
                 _jupiter_price_cache[mint] = (price_float, time.time())
                 
                 # Detailed logging for debugging decimals issues
@@ -742,6 +733,30 @@ class PriceFetcher:
         
         # Calculate spreads
         spreads = {}
+        
+        # Cross-validate Jupiter price with MEXC to detect anomalies
+        if jupiter_price and cex_bid and cex_ask:
+            mexc_mid = (cex_bid + cex_ask) / 2
+            if mexc_mid > 0:
+                jupiter_vs_mexc_diff = abs(jupiter_price - mexc_mid) / mexc_mid
+                # If Jupiter differs from MEXC by more than 50%, it's likely an anomaly
+                if jupiter_vs_mexc_diff > 0.5:
+                    # Check if we have a cached price that's closer to MEXC
+                    mint = token.jupiter_mint
+                    if mint and mint in _jupiter_price_cache:
+                        cached_price, _ = _jupiter_price_cache[mint]
+                        cached_vs_mexc_diff = abs(cached_price - mexc_mid) / mexc_mid
+                        # If cached price is closer to MEXC, use it
+                        if cached_vs_mexc_diff < jupiter_vs_mexc_diff:
+                            logger.warning(f"Jupiter ANOMALY (cross-validation): {token.name} jupiter=${jupiter_price:.8f} mexc_mid=${mexc_mid:.8f} diff={jupiter_vs_mexc_diff*100:.1f}% - using cached=${cached_price:.8f}")
+                            jupiter_price = cached_price
+                        else:
+                            # New price is closer to MEXC - this is a real price change!
+                            logger.info(f"Jupiter PRICE CHANGE: {token.name} new=${jupiter_price:.8f} is closer to mexc_mid=${mexc_mid:.8f} than cached=${cached_price:.8f}")
+                    else:
+                        # No cache - this might be first fetch with anomaly, skip it
+                        logger.warning(f"Jupiter ANOMALY (no cache): {token.name} jupiter=${jupiter_price:.8f} mexc_mid=${mexc_mid:.8f} diff={jupiter_vs_mexc_diff*100:.1f}% - skipping")
+                        jupiter_price = None
         
         if pancake_price:
             d, r = self.calc_spread(cex_bid, cex_ask, pancake_price)
