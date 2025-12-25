@@ -83,9 +83,147 @@ def get_solana_token_decimals(mint_address: str) -> int:
     logger.warning(f"Using default decimals=6 for {mint_address}")
     return 6
 
+
+async def get_solana_token_decimals_async(mint_address: str) -> int:
+    """Async version: Get token decimals from Solana RPC with caching."""
+    import httpx
+    
+    # Check cache first
+    if mint_address in DECIMALS_CACHE:
+        return DECIMALS_CACHE[mint_address]
+    
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(
+                SOLANA_RPC_URL,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTokenSupply",
+                    "params": [mint_address]
+                }
+            )
+            if response.status_code == 200:
+                data = response.json()
+                decimals = data.get("result", {}).get("value", {}).get("decimals")
+                if decimals is not None:
+                    DECIMALS_CACHE[mint_address] = int(decimals)
+                    return int(decimals)
+    except Exception as e:
+        logger.warning(f"Async Solana RPC error for {mint_address}: {e}")
+    
+    # Default to 6
+    DECIMALS_CACHE[mint_address] = 6
+    return 6
+
+
+async def batch_get_solana_decimals(mint_addresses: List[str]) -> Dict[str, int]:
+    """
+    Batch get decimals for multiple Solana tokens in parallel.
+    Returns dict {mint_address: decimals}
+    """
+    import httpx
+    
+    results = {}
+    to_fetch = []
+    
+    # Check cache first
+    for addr in mint_addresses:
+        if addr in DECIMALS_CACHE:
+            results[addr] = DECIMALS_CACHE[addr]
+        else:
+            to_fetch.append(addr)
+    
+    if not to_fetch:
+        return results
+    
+    # Fetch all in parallel
+    async def fetch_one(client: httpx.AsyncClient, mint: str) -> tuple:
+        try:
+            response = await client.post(
+                SOLANA_RPC_URL,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTokenSupply",
+                    "params": [mint]
+                }
+            )
+            if response.status_code == 200:
+                data = response.json()
+                decimals = data.get("result", {}).get("value", {}).get("decimals")
+                if decimals is not None:
+                    return mint, int(decimals)
+        except Exception:
+            pass
+        return mint, 6  # Default
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            tasks = [fetch_one(client, mint) for mint in to_fetch]
+            fetched = await asyncio.gather(*tasks)
+            
+            for mint, decimals in fetched:
+                DECIMALS_CACHE[mint] = decimals
+                results[mint] = decimals
+    except Exception as e:
+        logger.warning(f"Batch Solana RPC error: {e}")
+        # Set defaults for all unfetched
+        for mint in to_fetch:
+            if mint not in results:
+                DECIMALS_CACHE[mint] = 6
+                results[mint] = 6
+    
+    return results
+
 # Simple token-based auth for admin
 ADMIN_TOKENS: Dict[str, datetime] = {}
 TOKEN_EXPIRY_HOURS = 24
+
+
+def is_bsc_address(address: str) -> bool:
+    """Check if address is a valid BSC/Ethereum address (0x + 40 hex chars)."""
+    import re
+    return bool(re.match(r'^0x[a-fA-F0-9]{40}$', address))
+
+
+def is_solana_address(address: str) -> bool:
+    """Check if address is a valid Solana address (base58, 32-44 chars)."""
+    import re
+    # Solana addresses are base58 encoded, typically 32-44 characters
+    # Base58 alphabet: 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+    return bool(re.match(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$', address))
+
+
+def validate_address_for_dex(address: str, dex: str) -> tuple[bool, str]:
+    """
+    Validate that address format matches the selected DEX.
+    
+    Returns:
+        (is_valid, error_message)
+    """
+    if dex == "jupiter":
+        if is_bsc_address(address):
+            return False, f"BSC адрес {address[:10]}... не подходит для Jupiter. Выберите PancakeSwap."
+        if not is_solana_address(address):
+            return False, f"Неверный формат Solana адреса: {address[:10]}..."
+        return True, ""
+    
+    elif dex == "pancake":
+        if is_solana_address(address) and not is_bsc_address(address):
+            return False, f"Solana адрес {address[:10]}... не подходит для PancakeSwap. Выберите Jupiter."
+        if not is_bsc_address(address):
+            return False, f"Неверный формат BSC адреса: {address[:10]}..."
+        return True, ""
+    
+    elif dex == "matcha":
+        if is_solana_address(address) and not is_bsc_address(address):
+            return False, f"Solana адрес {address[:10]}... не подходит для Matcha. Выберите Jupiter."
+        if not is_bsc_address(address):
+            return False, f"Неверный формат Base адреса: {address[:10]}..."
+        return True, ""
+    
+    return True, ""  # Unknown DEX - allow
 
 
 def normalize_token_name(name: str) -> str:
@@ -1025,7 +1163,14 @@ async def admin_bulk_add_default_tokens(
     admin_token: str = Depends(get_admin_token),
     db: Session = Depends(get_db)
 ):
-    """Массовое добавление токенов по умолчанию по адресам контрактов."""
+    """
+    Массовое добавление токенов по умолчанию по адресам контрактов.
+    
+    Оптимизированная версия:
+    - Параллельная загрузка данных с DexScreener
+    - Batch загрузка decimals для Solana токенов
+    - Валидация адресов по выбранному DEX
+    """
     import httpx
     
     body = await request.json()
@@ -1040,137 +1185,165 @@ async def admin_bulk_add_default_tokens(
         "failed": []
     }
     
+    # Шаг 1: Валидация адресов и фильтрация
+    valid_addresses = []
     for address in addresses:
         address = address.strip()
         if not address:
             continue
         
+        is_valid, error_msg = validate_address_for_dex(address, dex)
+        if not is_valid:
+            results["failed"].append({"address": address, "error": error_msg})
+        else:
+            valid_addresses.append(address)
+    
+    if not valid_addresses:
+        return results
+    
+    # Шаг 2: Параллельная загрузка данных с DexScreener
+    async def fetch_dexscreener(client: httpx.AsyncClient, addr: str):
         try:
-            # Получаем информацию о токене через DexScreener
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}")
-                
-                if resp.status_code != 200:
-                    results["failed"].append({"address": address, "error": f"DexScreener HTTP {resp.status_code}"})
-                    continue
-                
+            resp = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}")
+            if resp.status_code == 200:
                 data = resp.json()
                 pairs = data.get("pairs") or []
-                
-                if not pairs:
-                    results["failed"].append({"address": address, "error": "Токен не найден на DexScreener"})
-                    continue
-                
-                # Берём первую пару с наибольшей ликвидностью
-                best_pair = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0))
-                
-                base_token = best_pair.get("baseToken") or {}
-                token_symbol = normalize_symbol(base_token.get("symbol", "UNKNOWN"))
-                token_name = f"{token_symbol}-USDT"  # Already normalized
-                
-                # Определяем параметры в зависимости от сети
-                chain_id = best_pair.get("chainId", "")
-                
-                jupiter_mint = None
-                jupiter_decimals = None
-                bsc_address = None
-                matcha_address = None
-                matcha_decimals = None
-                dexes = []
-                
-                # Solana / Jupiter
-                if chain_id == "solana" or dex == "jupiter":
+                if pairs:
+                    best_pair = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0))
+                    return addr, best_pair, None
+                return addr, None, "Токен не найден на DexScreener"
+            return addr, None, f"DexScreener HTTP {resp.status_code}"
+        except Exception as e:
+            return addr, None, str(e)
+    
+    dexscreener_results = {}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        tasks = [fetch_dexscreener(client, addr) for addr in valid_addresses]
+        fetched = await asyncio.gather(*tasks)
+        for addr, pair_data, error in fetched:
+            if error:
+                results["failed"].append({"address": addr, "error": error})
+            else:
+                dexscreener_results[addr] = pair_data
+    
+    if not dexscreener_results:
+        return results
+    
+    # Шаг 3: Для Jupiter - batch загрузка decimals
+    if dex == "jupiter":
+        solana_addresses = list(dexscreener_results.keys())
+        decimals_map = await batch_get_solana_decimals(solana_addresses)
+    else:
+        decimals_map = {}
+    
+    # Шаг 4: Обработка токенов
+    proxy_url = proxy_manager.get_proxy_url_cached()
+    
+    for address, best_pair in dexscreener_results.items():
+        try:
+            base_token = best_pair.get("baseToken") or {}
+            token_symbol = normalize_symbol(base_token.get("symbol", "UNKNOWN"))
+            token_name = f"{token_symbol}-USDT"
+            
+            chain_id = best_pair.get("chainId", "")
+            
+            jupiter_mint = None
+            jupiter_decimals = None
+            bsc_address = None
+            matcha_address = None
+            matcha_decimals = None
+            dexes = []
+            
+            # Solana / Jupiter
+            if chain_id == "solana" or dex == "jupiter":
+                jupiter_mint = address
+                jupiter_decimals = decimals_map.get(address, 6)
+                dexes.append("jupiter")
+            
+            # BSC / PancakeSwap
+            if chain_id == "bsc" or dex == "pancake":
+                bsc_address = address
+                dexes.append("pancake")
+            
+            # Base / Matcha
+            if chain_id == "base" or dex == "matcha":
+                matcha_address = address
+                matcha_decimals = 18
+                dexes.append("matcha")
+            
+            # Fallback если DEX не определился
+            if not dexes:
+                if dex == "jupiter":
                     jupiter_mint = address
-                    jupiter_decimals = get_solana_token_decimals(address)
-                    dexes.append("jupiter")
-                
-                # BSC / PancakeSwap
-                if chain_id == "bsc" or dex == "pancake":
+                    jupiter_decimals = decimals_map.get(address, 6)
+                    dexes = ["jupiter"]
+                elif dex == "pancake":
                     bsc_address = address
-                    dexes.append("pancake")
-                
-                # Base / Matcha
-                if chain_id == "base" or dex == "matcha":
+                    dexes = ["pancake"]
+                elif dex == "matcha":
                     matcha_address = address
                     matcha_decimals = 18
-                    dexes.append("matcha")
+                    dexes = ["matcha"]
+            
+            # Проверяем/создаём Token
+            token = db.query(Token).filter(Token.name == token_name).first()
+            if not token:
+                # Auto-detect mexc_symbol
+                mexc_symbol = None
                 
-                # Если DEX не определился автоматически
-                if not dexes:
-                    if dex == "jupiter":
-                        jupiter_mint = address
-                        jupiter_decimals = get_solana_token_decimals(address)
-                        dexes = ["jupiter"]
-                    elif dex == "pancake":
-                        bsc_address = address
-                        dexes = ["pancake"]
-                    elif dex == "matcha":
-                        matcha_address = address
-                        matcha_decimals = 18
-                        dexes = ["matcha"]
-                
-                # Проверяем/создаём Token (имя уже нормализовано)
-                token = db.query(Token).filter(Token.name == token_name).first()
-                if not token:
-                    # Auto-detect mexc_symbol
-                    mexc_symbol = None
-                    proxy_url = proxy_manager.get_proxy_url_cached()
-                    
-                    # Пробуем найти по Jupiter mint
-                    if jupiter_mint:
-                        mexc_symbol = find_matching_mexc_symbol(
-                            base_token=token_symbol,
-                            jupiter_mint=jupiter_mint,
-                            proxy_url=proxy_url
-                        )
-                        if mexc_symbol:
-                            logger.info(f"Found MEXC symbol for {token_symbol} via Jupiter: {mexc_symbol}")
-                    
-                    # Пробуем найти по BSC адресу
-                    if not mexc_symbol and bsc_address:
-                        mexc_symbol = find_matching_bsc_address(
-                            base_token=token_symbol,
-                            bsc_address=bsc_address,
-                            proxy_url=proxy_url
-                        )
-                        if mexc_symbol:
-                            logger.info(f"Found MEXC symbol for {token_symbol} via BSC: {mexc_symbol}")
-                    
-                    token = Token(
-                        name=token_name,
-                        base=token_symbol,
-                        quote="USDT",
-                        dexes=dexes,
+                if jupiter_mint:
+                    mexc_symbol = find_matching_mexc_symbol(
+                        base_token=token_symbol,
                         jupiter_mint=jupiter_mint,
-                        jupiter_decimals=jupiter_decimals,
-                        bsc_address=bsc_address,
-                        matcha_address=matcha_address,
-                        matcha_decimals=matcha_decimals,
-                        mexc_symbol=mexc_symbol,
-                        is_active=True
+                        proxy_url=proxy_url
                     )
-                    db.add(token)
-                    db.commit()
-                    db.refresh(token)
+                    if mexc_symbol:
+                        logger.info(f"Found MEXC symbol for {token_symbol} via Jupiter: {mexc_symbol}")
                 
-                # Проверяем нет ли уже в DefaultTokens
-                existing_default = db.query(DefaultToken).filter(DefaultToken.token_id == token.id).first()
-                if existing_default:
-                    results["failed"].append({"address": address, "error": f"Токен {token_name} уже в списке по умолчанию"})
-                    continue
+                if not mexc_symbol and bsc_address:
+                    mexc_symbol = find_matching_bsc_address(
+                        base_token=token_symbol,
+                        bsc_address=bsc_address,
+                        proxy_url=proxy_url
+                    )
+                    if mexc_symbol:
+                        logger.info(f"Found MEXC symbol for {token_symbol} via BSC: {mexc_symbol}")
                 
-                # Создаём ссылку в DefaultTokens
-                default_token = DefaultToken(token_id=token.id)
-                db.add(default_token)
+                token = Token(
+                    name=token_name,
+                    base=token_symbol,
+                    quote="USDT",
+                    dexes=dexes,
+                    jupiter_mint=jupiter_mint,
+                    jupiter_decimals=jupiter_decimals,
+                    bsc_address=bsc_address,
+                    matcha_address=matcha_address,
+                    matcha_decimals=matcha_decimals,
+                    mexc_symbol=mexc_symbol,
+                    is_active=True
+                )
+                db.add(token)
                 db.commit()
-                
-                results["success"].append({
-                    "address": address,
-                    "name": token_name,
-                    "symbol": token_symbol,
-                    "dexes": dexes
-                })
-                
+                db.refresh(token)
+            
+            # Проверяем нет ли уже в DefaultTokens
+            existing_default = db.query(DefaultToken).filter(DefaultToken.token_id == token.id).first()
+            if existing_default:
+                results["failed"].append({"address": address, "error": f"Токен {token_name} уже в списке по умолчанию"})
+                continue
+            
+            # Создаём ссылку в DefaultTokens
+            default_token = DefaultToken(token_id=token.id)
+            db.add(default_token)
+            db.commit()
+            
+            results["success"].append({
+                "address": address,
+                "name": token_name,
+                "symbol": token_symbol,
+                "dexes": dexes
+            })
+            
         except Exception as e:
             results["failed"].append({"address": address, "error": str(e)})
     
