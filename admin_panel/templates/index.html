@@ -317,8 +317,8 @@
         <div class="tabs">
             <button class="tab active" data-tab="proxies">Прокси</button>
             <button class="tab" data-tab="tokens">Токены</button>
-            <button class="tab" data-tab="keys">Ключи продукта</button>
             <button class="tab" data-tab="default-tokens">Токены по умолчанию</button>
+            <button class="tab" data-tab="keys">Ключи продукта</button>
         </div>
         
         <!-- Proxies Tab -->
@@ -347,8 +347,8 @@ user2:pass2@192.168.1.2:1080"></textarea>
                 <h2>Список прокси</h2>
                 <div style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                     <button class="btn btn-danger" onclick="clearAllProxies()">Удалить все</button>
-                    <button class="btn btn-primary" onclick="checkProxiesHealth()" id="checkHealthBtn">Проверить все</button>
                     <button class="btn btn-danger" onclick="deleteUnhealthyProxies()" id="deleteUnhealthyBtn">Удалить нерабочие</button>
+                    <button class="btn btn-primary" onclick="checkProxiesHealth()" id="checkHealthBtn">Проверить все</button>
                     <span id="lastHealthCheck" style="color: var(--text-secondary); font-size: 14px; margin-left: 10px;"></span>
                 </div>
                 <table>
