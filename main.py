@@ -1241,36 +1241,18 @@ async def admin_bulk_add_default_tokens(
                 matcha_decimals = None
                 dexes = []
                 
-                # Solana / Jupiter
-                if chain_id == "solana" or dex == "jupiter":
+                # Добавляем ТОЛЬКО выбранный DEX, не автоматически по chain_id
+                if dex == "jupiter":
                     jupiter_mint = address
                     jupiter_decimals = get_solana_token_decimals(address)
-                    dexes.append("jupiter")
-                
-                # BSC / PancakeSwap
-                if chain_id == "bsc" or dex == "pancake":
+                    dexes = ["jupiter"]
+                elif dex == "pancake":
                     bsc_address = address
-                    dexes.append("pancake")
-                
-                # Base / Matcha
-                if chain_id == "base" or dex == "matcha":
+                    dexes = ["pancake"]
+                elif dex == "matcha":
                     matcha_address = address
                     matcha_decimals = 18
-                    dexes.append("matcha")
-                
-                # Если DEX не определился автоматически
-                if not dexes:
-                    if dex == "jupiter":
-                        jupiter_mint = address
-                        jupiter_decimals = get_solana_token_decimals(address)
-                        dexes = ["jupiter"]
-                    elif dex == "pancake":
-                        bsc_address = address
-                        dexes = ["pancake"]
-                    elif dex == "matcha":
-                        matcha_address = address
-                        matcha_decimals = 18
-                        dexes = ["matcha"]
+                    dexes = ["matcha"]
                 
                 # Проверяем/создаём Token (имя уже нормализовано)
                 token = db.query(Token).filter(Token.name == token_name).first()
