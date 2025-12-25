@@ -430,6 +430,16 @@ class PriceFetcher:
                 price = JUPITER_USDT_AMOUNT / token_amount
                 price_float = float(price)
                 
+                # Validate price against cache - Jupiter sometimes returns anomalous values
+                if mint in _jupiter_price_cache:
+                    cached_price, _ = _jupiter_price_cache[mint]
+                    if cached_price > 0:
+                        price_change_ratio = abs(price_float - cached_price) / cached_price
+                        # If price changed more than 90%, it's likely an anomaly - use cached value
+                        if price_change_ratio > 0.9:
+                            logger.warning(f"Jupiter ANOMALY: mint={mint[:12]}... new_price=${price_float:.8f} cached=${cached_price:.8f} change={price_change_ratio*100:.1f}% - using cached")
+                            return cached_price
+                
                 # Cache the result
                 _jupiter_price_cache[mint] = (price_float, time.time())
                 
