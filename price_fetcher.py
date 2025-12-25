@@ -430,17 +430,28 @@ class PriceFetcher:
                 price = JUPITER_USDT_AMOUNT / token_amount
                 price_float = float(price)
                 
-                # Validate price against cache - Jupiter sometimes returns anomalous values
+                # ABSOLUTE validation - reject obviously wrong prices
+                # If price is less than $0.0000001 (10^-7), it's almost certainly an anomaly
+                if price_float < 0.0000001:
+                    logger.warning(f"Jupiter ANOMALY (absolute): mint={mint[:12]}... price=${price_float:.12f} is too low - skipping")
+                    # Return cached value if available, otherwise None
+                    if mint in _jupiter_price_cache:
+                        cached_price, _ = _jupiter_price_cache[mint]
+                        if cached_price > 0.0000001:
+                            return cached_price
+                    return None
+                
+                # RELATIVE validation - reject sudden large changes
                 if mint in _jupiter_price_cache:
                     cached_price, _ = _jupiter_price_cache[mint]
-                    if cached_price > 0:
+                    if cached_price > 0.0000001:  # Only compare with valid cached prices
                         price_change_ratio = abs(price_float - cached_price) / cached_price
                         # If price changed more than 90%, it's likely an anomaly - use cached value
                         if price_change_ratio > 0.9:
-                            logger.warning(f"Jupiter ANOMALY: mint={mint[:12]}... new_price=${price_float:.8f} cached=${cached_price:.8f} change={price_change_ratio*100:.1f}% - using cached")
+                            logger.warning(f"Jupiter ANOMALY (relative): mint={mint[:12]}... new=${price_float:.8f} cached=${cached_price:.8f} change={price_change_ratio*100:.1f}% - using cached")
                             return cached_price
                 
-                # Cache the result
+                # Cache the result (only valid prices reach here)
                 _jupiter_price_cache[mint] = (price_float, time.time())
                 
                 # Detailed logging for debugging decimals issues
