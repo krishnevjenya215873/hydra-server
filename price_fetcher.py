@@ -433,7 +433,8 @@ class PriceFetcher:
                 # Cache the result
                 _jupiter_price_cache[mint] = (price_float, time.time())
                 
-                logger.debug(f"Jupiter: 1 TOKEN ({mint}) = {price_float:.8f} USDT")
+                # Detailed logging for debugging decimals issues
+                logger.info(f"Jupiter PRICE: mint={mint[:12]}... decimals={decimals} outAmount={out_amount_raw} price=${price_float:.8f}")
                 return price_float
                 
             except Exception as e:
