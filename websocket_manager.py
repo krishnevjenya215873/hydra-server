@@ -153,6 +153,24 @@ class ConnectionManager:
     def get_subscribed_tokens(self) -> Set[str]:
         """Get set of all subscribed tokens."""
         return set(self._subscriptions.keys()) - {"__all__"}
+    
+    async def close_all(self):
+        """Close all WebSocket connections gracefully."""
+        async with self._lock:
+            connections = list(self._connections)
+        
+        for websocket in connections:
+            try:
+                await websocket.close(code=1001, reason="Server shutting down")
+            except Exception as e:
+                logger.debug(f"Error closing websocket: {e}")
+        
+        async with self._lock:
+            self._connections.clear()
+            self._subscriptions.clear()
+            self._client_subscriptions.clear()
+        
+        logger.info(f"Closed {len(connections)} WebSocket connections")
 
 
 # Global connection manager

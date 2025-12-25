@@ -228,10 +228,30 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Shutdown
-    logger.info("Shutting down HYDRA server...")
-    price_worker.stop()
-    proxy_health_checker.stop()
+    # Graceful Shutdown
+    logger.info("Shutting down HYDRA server gracefully...")
+    
+    # Stop workers first
+    try:
+        price_worker.stop()
+        logger.info("Price worker stopped")
+    except Exception as e:
+        logger.error(f"Error stopping price worker: {e}")
+    
+    try:
+        proxy_health_checker.stop()
+        logger.info("Proxy health checker stopped")
+    except Exception as e:
+        logger.error(f"Error stopping proxy health checker: {e}")
+    
+    # Close all WebSocket connections gracefully
+    try:
+        await connection_manager.close_all()
+        logger.info("All WebSocket connections closed")
+    except Exception as e:
+        logger.error(f"Error closing WebSocket connections: {e}")
+    
+    logger.info("HYDRA server shutdown complete")
 
 
 app = FastAPI(
@@ -258,8 +278,41 @@ app.add_middleware(
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "ok", "timestamp": time.time()}
+    """Health check endpoint for Railway.
+    Returns detailed status for monitoring."""
+    status = "ok"
+    details = {}
+    
+    # Check if worker is running
+    details["worker_running"] = price_worker._running
+    
+    # Check database connection
+    try:
+        if models.SessionLocal:
+            db = models.SessionLocal()
+            try:
+                db.execute(text("SELECT 1"))
+                details["database"] = "connected"
+            finally:
+                db.close()
+        else:
+            details["database"] = "not_initialized"
+            status = "degraded"
+    except Exception as e:
+        details["database"] = f"error: {str(e)[:50]}"
+        status = "degraded"
+    
+    # Check WebSocket connections
+    details["websocket_connections"] = connection_manager.get_connection_count()
+    
+    # Uptime
+    details["uptime_seconds"] = int(time.time() - SERVER_START_TIME)
+    
+    return {
+        "status": status,
+        "timestamp": time.time(),
+        "details": details
+    }
 
 
 @app.get("/stats", response_model=ServerStats)

@@ -80,13 +80,28 @@ class PriceWorker:
             return self._latest_data.get(token_name)
     
     def _run_loop(self):
-        """Main worker loop - continuous fetching without delays."""
+        """Main worker loop - continuous fetching without delays.
+        Auto-restarts on critical errors to maintain stability."""
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        
         while self._running:
             try:
                 self._fetch_all_prices_streaming()
+                consecutive_errors = 0  # Reset on success
             except Exception as e:
-                logger.error(f"Worker error: {e}")
-                time.sleep(1)  # Only sleep on error
+                consecutive_errors += 1
+                logger.error(f"Worker error ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.critical(f"Too many consecutive errors, resetting worker state...")
+                    consecutive_errors = 0
+                    # Clear any stale state
+                    with self._lock:
+                        self._latest_data.clear()
+                    time.sleep(5)  # Longer pause before retry
+                else:
+                    time.sleep(1)  # Short pause on error
     
     def _fetch_all_prices_streaming(self):
         """Fetch prices for all tokens with IMMEDIATE updates as each completes.
@@ -170,7 +185,7 @@ class PriceWorker:
     _history_buffer: Dict[str, Dict] = {}
     _history_buffer_lock = threading.Lock()
     _last_history_save: float = 0
-    _history_save_interval: float = 5.0  # Save history every 5 seconds
+    _history_save_interval: float = 15.0  # Save history every 15 seconds (reduced DB load)
     
     def _save_history_single(self, token_name: str, data: Dict):
         """Buffer spread data for batch saving (every 5 seconds instead of every update)."""
