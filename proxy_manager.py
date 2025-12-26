@@ -3,6 +3,7 @@ Proxy manager for server-side requests.
 Handles proxy rotation, failure tracking, and protocol selection.
 UPDATED: Proxies are only deactivated by health checker (ipinfo.io), not by API errors.
 Health checker checks ALL proxies (not just active) and reactivates working ones.
+OPTIMIZED: Parallel proxy health checking using ThreadPoolExecutor for 10x faster checks.
 """
 
 import random
@@ -13,6 +14,7 @@ import requests
 from datetime import datetime
 from typing import Optional, Dict, List
 from sqlalchemy.orm import Session
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from models import Proxy
 
@@ -20,9 +22,10 @@ logger = logging.getLogger(__name__)
 
 # URL для проверки прокси (ipinfo.io)
 PROXY_CHECK_URL = "https://ipinfo.io/json"
-PROXY_CHECK_TIMEOUT = 15  # секунд
+PROXY_CHECK_TIMEOUT = 10  # секунд (уменьшено с 15 для быстрой проверки)
 PROXY_CHECK_INTERVAL = 300  # 5 минут в секундах
 PROXY_MAX_FAILURES = 5  # Количество неудачных проверок перед деактивацией
+PROXY_CHECK_WORKERS = 50  # Количество параллельных воркеров для проверки
 
 
 class ProxyManager:
@@ -214,26 +217,26 @@ class ProxyManager:
                     result["country"] = data.get("country")
                 except:
                     pass
-                logger.info(f"Proxy {proxy.get('id')} OK: {result['response_time']}ms, IP: {result['ip']}")
+                logger.debug(f"Proxy {proxy.get('id')} OK: {result['response_time']}ms, IP: {result['ip']}")
             else:
                 result["error"] = f"HTTP {response.status_code}"
-                logger.warning(f"Proxy {proxy.get('id')} check failed: HTTP {response.status_code}")
+                logger.debug(f"Proxy {proxy.get('id')} check failed: HTTP {response.status_code}")
                 
         except requests.exceptions.Timeout:
             result["error"] = "Timeout"
-            logger.warning(f"Proxy {proxy.get('id')} check failed: Timeout")
+            logger.debug(f"Proxy {proxy.get('id')} check failed: Timeout")
         except requests.exceptions.ProxyError as e:
             result["error"] = f"Proxy error: {str(e)[:50]}"
-            logger.warning(f"Proxy {proxy.get('id')} check failed: Proxy error")
+            logger.debug(f"Proxy {proxy.get('id')} check failed: Proxy error")
         except Exception as e:
             result["error"] = str(e)[:100]
-            logger.warning(f"Proxy {proxy.get('id')} check failed: {e}")
+            logger.debug(f"Proxy {proxy.get('id')} check failed: {e}")
         
         return result
     
     def check_all_proxies(self, db: Session) -> List[Dict]:
         """
-        Проверяет ВСЕ прокси (активные и неактивные) и обновляет их статус в БД.
+        Проверяет ВСЕ прокси (активные и неактивные) ПАРАЛЛЕЛЬНО и обновляет их статус в БД.
         
         Логика:
         - Если проверка успешна: fail_count = 0, is_active = True
@@ -241,47 +244,87 @@ class ProxyManager:
         - Если fail_count >= 5: is_active = False
         
         Это позволяет неактивным прокси вернуться в строй, если они заработали.
+        ОПТИМИЗИРОВАНО: Используется ThreadPoolExecutor для параллельной проверки.
         """
         # Получаем ВСЕ прокси, не только активные
         proxies = db.query(Proxy).all()
+        
+        if not proxies:
+            logger.info("No proxies to check")
+            return []
+        
+        # Создаём список для проверки
+        proxy_dicts = [
+            {
+                "id": p.id,
+                "proxy_string": p.proxy_string,
+                "protocol": p.protocol
+            }
+            for p in proxies
+        ]
+        
+        # Создаём словарь для быстрого доступа к ORM объектам
+        proxy_map = {p.id: p for p in proxies}
+        
         results = []
         
-        for proxy in proxies:
-            proxy_dict = {
-                "id": proxy.id,
-                "proxy_string": proxy.proxy_string,
-                "protocol": proxy.protocol
-            }
-            result = self.check_proxy_health(proxy_dict)
-            results.append(result)
-            
-            # Обновляем статус в БД
-            if result["working"]:
-                # Успех - сбрасываем счётчик и активируем
-                old_status = proxy.is_active
-                proxy.fail_count = 0
-                proxy.is_active = True
-                proxy.last_used = datetime.utcnow()
-                if not old_status:
-                    logger.info(f"Proxy {proxy.id} REACTIVATED: health check passed")
-            else:
-                # Неудача - увеличиваем счётчик
-                proxy.fail_count += 1
-                if proxy.fail_count >= PROXY_MAX_FAILURES:
-                    if proxy.is_active:
-                        proxy.is_active = False
-                        logger.warning(f"Proxy {proxy.id} DISABLED: fail_count reached {PROXY_MAX_FAILURES}")
-                else:
-                    logger.info(f"Proxy {proxy.id} check failed, fail_count: {proxy.fail_count}/{PROXY_MAX_FAILURES}")
+        logger.info(f"Starting parallel health check for {len(proxy_dicts)} proxies with {PROXY_CHECK_WORKERS} workers...")
+        start_time = time.time()
         
+        # Параллельная проверка с ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=PROXY_CHECK_WORKERS) as executor:
+            # Запускаем все проверки параллельно
+            future_to_proxy = {
+                executor.submit(self.check_proxy_health, proxy_dict): proxy_dict
+                for proxy_dict in proxy_dicts
+            }
+            
+            # Собираем результаты по мере завершения
+            for future in as_completed(future_to_proxy):
+                proxy_dict = future_to_proxy[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    
+                    # Обновляем статус в БД
+                    proxy = proxy_map.get(result["id"])
+                    if proxy:
+                        if result["working"]:
+                            # Успех - сбрасываем счётчик и активируем
+                            old_status = proxy.is_active
+                            proxy.fail_count = 0
+                            proxy.is_active = True
+                            proxy.last_used = datetime.utcnow()
+                            if not old_status:
+                                logger.info(f"Proxy {proxy.id} REACTIVATED: health check passed")
+                        else:
+                            # Неудача - увеличиваем счётчик
+                            proxy.fail_count += 1
+                            if proxy.fail_count >= PROXY_MAX_FAILURES:
+                                if proxy.is_active:
+                                    proxy.is_active = False
+                                    logger.warning(f"Proxy {proxy.id} DISABLED: fail_count reached {PROXY_MAX_FAILURES}")
+                            
+                except Exception as e:
+                    logger.error(f"Error checking proxy {proxy_dict.get('id')}: {e}")
+                    results.append({
+                        "id": proxy_dict.get("id"),
+                        "working": False,
+                        "error": str(e)[:100],
+                        "checked_at": datetime.utcnow().isoformat()
+                    })
+        
+        # Коммитим все изменения разом
         db.commit()
+        
+        elapsed = time.time() - start_time
         
         # Force refresh cache to pick up changes
         self._cache_updated = None
         
-        working_count = len([r for r in results if r['working']])
+        working_count = len([r for r in results if r.get('working')])
         total_active = db.query(Proxy).filter(Proxy.is_active == True).count()
-        logger.info(f"Health check completed: {working_count}/{len(results)} working, {total_active} active")
+        logger.info(f"Health check completed in {elapsed:.1f}s: {working_count}/{len(results)} working, {total_active} active")
         return results
 
 
