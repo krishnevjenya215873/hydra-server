@@ -790,6 +790,11 @@ async def admin_add_proxy(
     db.add(proxy)
     db.commit()
     db.refresh(proxy)
+    
+    # Force refresh proxy cache so new proxy is available immediately
+    proxy_manager.force_refresh_cache(db)
+    logger.info(f"Proxy cache refreshed after adding proxy {proxy.id}")
+    
     return proxy
 
 
@@ -821,6 +826,11 @@ async def admin_add_proxies_bulk(
     
     db.commit()
     logger.info(f"Added {added} proxies")
+    
+    # Force refresh proxy cache so new proxies are available immediately
+    proxy_manager.force_refresh_cache(db)
+    logger.info(f"Proxy cache refreshed: {len(proxy_manager._proxy_cache)} active proxies")
+    
     return {"status": "ok", "added": added}
 
 
@@ -838,6 +848,11 @@ async def admin_delete_proxy(
     
     db.delete(proxy)
     db.commit()
+    
+    # Force refresh proxy cache after deletion
+    proxy_manager.force_refresh_cache(db)
+    logger.info(f"Proxy cache refreshed after deleting proxy {proxy_id}")
+    
     return {"status": "deleted", "proxy_id": proxy_id}
 
 
@@ -855,6 +870,11 @@ async def admin_toggle_proxy(
     
     proxy.is_active = not proxy.is_active
     db.commit()
+    
+    # Force refresh proxy cache after toggle
+    proxy_manager.force_refresh_cache(db)
+    logger.info(f"Proxy cache refreshed after toggling proxy {proxy_id}")
+    
     return {"status": "ok", "is_active": proxy.is_active}
 
 
@@ -868,6 +888,11 @@ async def admin_clear_proxies(
     count = db.query(Proxy).delete()
     db.commit()
     logger.info(f"Cleared {count} proxies")
+    
+    # Force refresh proxy cache after clearing all
+    proxy_manager.force_refresh_cache(db)
+    logger.info(f"Proxy cache refreshed: {len(proxy_manager._proxy_cache)} active proxies")
+    
     return {"status": "ok", "deleted": count}
 
 
