@@ -105,6 +105,7 @@ class TokenSpreadUpdate(BaseModel):
     """Real-time spread update for a token."""
     token_name: str
     mexc_price: tuple = Field(default=(None, None), description="(bid, ask)")
+    mexc_limit: Optional[float] = Field(default=None, description="Minimum order size in USDT")
     spreads: Dict[str, SpreadData] = Field(default_factory=dict)
     timestamp: float
 

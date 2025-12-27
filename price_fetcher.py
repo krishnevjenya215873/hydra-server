@@ -127,6 +127,11 @@ class PriceFetcher:
     _mexc_cache_time: float = 0
     _mexc_cache_ttl: float = 1.0  # Cache valid for 1 second
     
+    # MEXC contract details cache (for limits)
+    _mexc_contracts_cache: Dict[str, Dict[str, Any]] = {}
+    _mexc_contracts_cache_time: float = 0
+    _mexc_contracts_cache_ttl: float = 60.0  # Cache valid for 60 seconds (contract details don't change often)
+    
     def get_all_mexc_prices(self, max_retries: int = 2) -> Dict[str, Tuple[float, float]]:
         """Get ALL futures prices from MEXC in ONE request. Returns dict of symbol -> (bid, ask).
         OPTIMIZED: No DB session required - uses cached proxy list.
@@ -178,6 +183,107 @@ class PriceFetcher:
                     continue
         
         return {}
+    
+    def get_all_mexc_contracts(self, max_retries: int = 2) -> Dict[str, Dict[str, Any]]:
+        """Get ALL futures contract details from MEXC in ONE request.
+        Returns dict of symbol -> {contractSize, minVol, maxVol, volUnit}.
+        Used to calculate order limits in USDT.
+        """
+        current_time = time.time()
+        
+        # Return cached data if still valid
+        if current_time - self._mexc_contracts_cache_time < self._mexc_contracts_cache_ttl and self._mexc_contracts_cache:
+            return self._mexc_contracts_cache
+        
+        for attempt in range(max_retries):
+            try:
+                # Get proxy from cache (no DB required)
+                proxy_url = proxy_manager.get_proxy_url_cached()
+                transport = None
+                if proxy_url:
+                    transport = httpx.HTTPTransport(proxy=proxy_url)
+                
+                with httpx.Client(timeout=10.0, transport=transport) as client:
+                    r = client.get(f"{MEXC_FUTURES_BASE}/api/v1/contract/detail")
+                
+                if r.status_code != 200:
+                    logger.warning(f"MEXC contracts: HTTP {r.status_code} (attempt {attempt + 1}/{max_retries})")
+                    continue
+                
+                j = r.json()
+                
+                if j.get("success") and j.get("code") == 0 and j.get("data"):
+                    contracts = {}
+                    data = j["data"]
+                    
+                    # API returns single contract or list depending on whether symbol param was passed
+                    if isinstance(data, dict):
+                        data = [data]
+                    
+                    for item in data:
+                        symbol = item.get("symbol")
+                        if symbol:
+                            contracts[symbol] = {
+                                "contractSize": float(item.get("contractSize", 1)),
+                                "minVol": int(item.get("minVol", 1)),
+                                "maxVol": int(item.get("maxVol", 1000000)),
+                                "volUnit": int(item.get("volUnit", 1)),
+                            }
+                    
+                    # Update cache
+                    self._mexc_contracts_cache = contracts
+                    self._mexc_contracts_cache_time = current_time
+                    logger.debug(f"MEXC contracts: fetched {len(contracts)} contract details")
+                    return contracts
+                
+                logger.warning(f"MEXC contracts: unsuccessful response: {j}")
+                return {}
+                
+            except Exception as e:
+                logger.error(f"MEXC contracts: error: {e}")
+                if attempt < max_retries - 1:
+                    continue
+        
+        return {}
+    
+    def get_mexc_limit_usdt(self, base: str, quote: str = "USDT", current_price: Optional[float] = None) -> Optional[float]:
+        """Calculate minimum order limit in USDT for a MEXC futures contract.
+        
+        Formula: minVol * contractSize * price
+        
+        Returns minimum order size in USDT, or None if data unavailable.
+        """
+        import re
+        # Clean base symbol
+        clean_base = re.sub(r'[$#@!%^&*()\-+=/\\|<>?~`]', '', base).strip()
+        symbol = f"{clean_base.upper()}_{quote.upper()}"
+        
+        # Get contract details from cache
+        contracts = self.get_all_mexc_contracts()
+        if symbol not in contracts:
+            logger.debug(f"MEXC limit: no contract data for {symbol}")
+            return None
+        
+        contract = contracts[symbol]
+        contract_size = contract.get("contractSize", 1)
+        min_vol = contract.get("minVol", 1)
+        
+        # Get current price if not provided
+        if current_price is None:
+            prices = self._mexc_prices_cache
+            if symbol in prices:
+                bid, ask = prices[symbol]
+                current_price = (bid + ask) / 2 if bid and ask else bid or ask
+        
+        if current_price is None or current_price <= 0:
+            logger.debug(f"MEXC limit: no price for {symbol}")
+            return None
+        
+        # Calculate minimum order in USDT
+        min_usdt = min_vol * contract_size * current_price
+        
+        logger.debug(f"MEXC limit: {symbol} minVol={min_vol} contractSize={contract_size} price={current_price:.6f} -> min={min_usdt:.2f} USDT")
+        return round(min_usdt, 2)
     
     def get_mexc_price_from_cache(self, base: str, quote: str = "USDT", price_scale: Optional[int] = None) -> Tuple[Optional[float], Optional[float]]:
         """Get MEXC price from cached batch data.
@@ -798,9 +904,15 @@ class PriceFetcher:
                 "cex_ask": cex_ask,
             }
         
+        # Get MEXC order limit in USDT
+        mexc_base = token.mexc_symbol if token.mexc_symbol else base
+        mexc_mid_price = (cex_bid + cex_ask) / 2 if cex_bid and cex_ask else None
+        mexc_limit = self.get_mexc_limit_usdt(mexc_base, quote, mexc_mid_price)
+        
         return {
             "token_name": token.name,
             "mexc_price": (cex_bid, cex_ask),
+            "mexc_limit": mexc_limit,
             "spreads": spreads,
             "timestamp": time.time(),
         }
