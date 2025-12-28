@@ -7,3 +7,5 @@ healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 10
+# Increase memory and CPU for 300 tokens
+# numReplicas = 1  # Can increase for horizontal scaling

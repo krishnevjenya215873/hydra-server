@@ -99,24 +99,23 @@ class PriceFetcher:
     
     def _get_client_cached(self):
         """Get HTTP client with proxy from cache - NO DB session required.
-        OPTIMIZED: Uses cached proxy list for parallel thread safety.
+        OPTIMIZED: Uses httpx instead of cloudscraper to reduce memory usage.
         """
         # Get proxy from cache (no DB required)
         proxy_url = proxy_manager.get_proxy_url_cached()
         
-        # Create new scraper with proxy
-        client = cloudscraper.create_scraper(
-            browser={
-                "browser": "chrome",
-                "platform": "windows",
-                "mobile": False
+        # Use lightweight httpx client instead of heavy cloudscraper
+        transport = None
+        if proxy_url:
+            transport = httpx.HTTPTransport(proxy=proxy_url)
+        
+        return httpx.Client(
+            timeout=10.0,
+            transport=transport,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
         )
-        
-        if proxy_url:
-            client.proxies = {"http": proxy_url, "https": proxy_url}
-        
-        return client
     
     def _throttle(self):
         """Throttling disabled - each request uses its own proxy."""
@@ -401,10 +400,13 @@ class PriceFetcher:
         url = f"{DEXSCREENER_TOKENS_URL}/{addr}"
         
         for attempt in range(max_retries):
-            client = self._get_client_cached()  # No DB required
-            
             try:
-                resp = client.get(url, timeout=DEXSCREENER_TIMEOUT)
+                client = self._get_client_cached()  # No DB required
+                try:
+                    resp = client.get(url, timeout=DEXSCREENER_TIMEOUT)
+                finally:
+                    client.close()  # Always close to free memory
+                    
                 if resp.status_code != 200:
                     logger.warning(f"Pancake: HTTP {resp.status_code} for {addr}, switching proxy (attempt {attempt + 1}/{max_retries})")
                     continue
