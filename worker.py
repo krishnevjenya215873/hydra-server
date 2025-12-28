@@ -31,7 +31,7 @@ class PriceWorker:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._interval = 0.0  # NO DELAY between cycles for real-time updates
-        self._max_workers = 50  # Reduced from 300 to prevent OOM - processes in batches
+        self._max_workers = 300  # All 300 tokens in parallel for instant updates every second
         self._latest_data: Dict[str, Dict] = {}
         self._callbacks: Set[Callable] = set()
         self._lock = threading.Lock()
